@@ -99,6 +99,7 @@ fn router(state: AppState) -> axum::Router {
                     Method::PATCH,
                     Method::DELETE,
                     Method::OPTIONS,
+                    Method::HEAD,
                 ])
                 .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]),
         )
