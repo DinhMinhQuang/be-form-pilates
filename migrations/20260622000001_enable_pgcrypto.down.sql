@@ -1,0 +1,1 @@
+-- Intentionally keep pgcrypto installed. It may have existed before this app.
