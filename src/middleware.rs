@@ -12,14 +12,18 @@ pub async fn log_body(req: Request, next: Next) -> Response {
         .unwrap_or_default();
 
     let (req_parts, req_body) = req.into_parts();
-    let req_bytes = axum::body::to_bytes(req_body, usize::MAX).await.unwrap_or_default();
+    let req_bytes = axum::body::to_bytes(req_body, usize::MAX)
+        .await
+        .unwrap_or_default();
     tracing::info!(request_id = %request_id, body = %fmt(&req_bytes), "→ body");
 
     let req = Request::from_parts(req_parts, Body::from(req_bytes));
     let response = next.run(req).await;
 
     let (res_parts, res_body) = response.into_parts();
-    let res_bytes = axum::body::to_bytes(res_body, usize::MAX).await.unwrap_or_default();
+    let res_bytes = axum::body::to_bytes(res_body, usize::MAX)
+        .await
+        .unwrap_or_default();
     tracing::info!(
         request_id = %request_id,
         method = %method,
