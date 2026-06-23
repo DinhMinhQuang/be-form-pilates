@@ -1,0 +1,60 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - deploy
+
+concurrency:
+  group: production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Deploy
+        run: |
+          set -e
+
+          VERSION=$(date +%Y%m%d%H%M%S)
+
+          RELEASE_DIR="/opt/form-pilates/releases/$VERSION"
+
+          mkdir -p "$RELEASE_DIR"
+
+          cp target/release/form-pilates \
+            "$RELEASE_DIR/form-pilates"
+
+          chmod +x \
+            "$RELEASE_DIR/form-pilates"
+
+          ln -sfn \
+            "$RELEASE_DIR" \
+            /opt/form-pilates/current
+
+      - name: Restart service
+        run: |
+          sudo systemctl restart form-pilates
+
+      - name: Health check
+        run: |
+          sudo systemctl is-active form-pilates
