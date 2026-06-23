@@ -1,4 +1,7 @@
-use argon2::{Argon2, PasswordHasher, password_hash::{SaltString, rand_core::OsRng}};
+use argon2::{
+    Argon2, PasswordHasher,
+    password_hash::{SaltString, rand_core::OsRng},
+};
 
 fn hash(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
