@@ -6,7 +6,35 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{auth::AuthStudent, error::AppError, state::AppState};
+use crate::{auth::{AuthUser, AuthStudent}, error::AppError, state::AppState};
+
+#[derive(Serialize)]
+pub struct MeResponse {
+    id: Uuid,
+    role: String,
+    full_name: String,
+    email: Option<String>,
+    phone: Option<String>,
+}
+
+pub async fn me(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<MeResponse>, AppError> {
+    let row: (String, String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT role, full_name, email, phone FROM app_user WHERE id = $1",
+    )
+    .bind(user.id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(MeResponse {
+        id: user.id,
+        role: row.0,
+        full_name: row.1,
+        email: row.2,
+        phone: row.3,
+    }))
+}
 
 #[derive(Deserialize)]
 pub struct ScheduleQuery {

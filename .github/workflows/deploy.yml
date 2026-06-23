@@ -37,27 +37,15 @@ jobs:
       - name: Deploy
         run: |
           set -e
-
           VERSION=$(date +%Y%m%d%H%M%S)
-
           RELEASE_DIR="/opt/form-pilates/releases/$VERSION"
-
           mkdir -p "$RELEASE_DIR"
-
-          cp target/release/form-pilates \
-            "$RELEASE_DIR/form-pilates"
-
-          chmod +x \
-            "$RELEASE_DIR/form-pilates"
-
-          ln -sfn \
-            "$RELEASE_DIR" \
-            /opt/form-pilates/current
+          cp target/release/form-pilates "$RELEASE_DIR/form-pilates"
+          chmod +x "$RELEASE_DIR/form-pilates"
+          ln -sfn "$RELEASE_DIR" /opt/form-pilates/current
 
       - name: Restart service
-        run: |
-          sudo systemctl restart form-pilates
+        run: sudo systemctl restart form-pilates
 
       - name: Health check
-        run: |
-          systemctl is-active form-pilates
+        run: systemctl is-active form-pilates

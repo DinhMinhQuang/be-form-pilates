@@ -5,15 +5,23 @@ mod catalog;
 mod domain;
 mod error;
 mod integration;
+mod middleware;
+mod request_id;
 mod state;
 mod student;
 mod trainer;
 
-// use tower_http::cors::CorsLayer;
+use std::time::Duration;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
+use axum::extract::Request;
+use axum::http::{Method, Response, header};
+use axum::middleware as axum_middleware;
 use sqlx::postgres::PgPoolOptions;
 use tokio::signal;
+use tracing::Span;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -44,11 +52,56 @@ fn router(state: AppState) -> axum::Router {
         .merge(admin::routes())
         .merge(auth::routes())
         .merge(catalog::routes())
-        // mỗi feature tự khai báo route của nó rồi nest vào đây
         .merge(booking::routes())
         .merge(student::routes())
         .merge(integration::routes())
         .merge(trainer::routes())
+        .layer(axum_middleware::from_fn(crate::middleware::log_body))
+        .layer(
+            TraceLayer::new_for_http()
+                .on_request(|req: &Request<_>, _span: &Span| {
+                    let request_id = req
+                        .extensions()
+                        .get::<request_id::RequestId>()
+                        .map(|id| id.0.as_str());
+                    tracing::info!(
+                        request_id = ?request_id,
+                        method = %req.method(),
+                        path = %req.uri().path(),
+                        query = ?req.uri().query(),
+                        headers = ?req.headers(),
+                        "→ request"
+                    );
+                })
+                .on_response(|res: &Response<_>, latency: Duration, _span: &Span| {
+                    tracing::info!(
+                        status = %res.status(),
+                        latency = ?latency,
+                        "← response"
+                    );
+                })
+                .on_failure(|error, latency: Duration, _span: &Span| {
+                    tracing::error!(
+                        error = %error,
+                        latency = ?latency,
+                        "❌ error"
+                    );
+                }),
+        )
+        .layer(axum_middleware::from_fn(request_id::request_id))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::PATCH,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
+                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]),
+        )
         .with_state(state)
 }
 
