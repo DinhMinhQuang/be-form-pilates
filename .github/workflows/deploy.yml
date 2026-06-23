@@ -18,6 +18,7 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
       - name: Install rustfmt
         run: rustup component add rustfmt
 
@@ -59,4 +60,4 @@ jobs:
 
       - name: Health check
         run: |
-          sudo systemctl is-active form-pilates
+          systemctl is-active form-pilates
