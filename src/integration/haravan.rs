@@ -1,6 +1,6 @@
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -257,6 +257,27 @@ pub async fn order_paid(
     Ok(StatusCode::OK)
 }
 
+#[derive(Deserialize)]
+pub struct HaravanVerifyQuery {
+    #[serde(rename = "hub.mode")]
+    mode: String,
+    #[serde(rename = "hub.verify_token")]
+    verify_token: String,
+    #[serde(rename = "hub.challenge")]
+    challenge: String,
+}
+
+pub async fn verify_webhook(
+    State(_state): State<AppState>,
+    Query(query): Query<HaravanVerifyQuery>,
+) -> Result<String, AppError> {
+    let secret = std::env::var("HARAVAN_WEBHOOK_SECRET")
+        .map_err(|_| AppError::Integration("HARAVAN_WEBHOOK_SECRET_missing"))?;
+    if query.mode != "subscribe" || query.verify_token != secret {
+        return Err(AppError::Unauthorized);
+    }
+    Ok(query.challenge)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
