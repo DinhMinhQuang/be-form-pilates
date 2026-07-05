@@ -16,15 +16,14 @@ struct BranchView {
     id: Uuid,
     code: String,
     name: String,
-    address: String,
     timezone: String,
     status: String,
     class_type_ids: Vec<Uuid>,
 }
 
 async fn branches(State(state): State<AppState>) -> Result<Json<Vec<BranchView>>, AppError> {
-    let rows: Vec<(Uuid, String, String, String, String, String, Vec<Uuid>)> = sqlx::query_as(
-        r#"SELECT b.id, b.code, b.name, b.address, b.timezone, b.status,
+    let rows: Vec<(Uuid, String, String, String, String, Vec<Uuid>)> = sqlx::query_as(
+        r#"SELECT b.id, b.code, b.name, b.timezone, b.status,
                   COALESCE(array_agg(bct.class_type_id ORDER BY ct.name)
                     FILTER (WHERE bct.enabled), ARRAY[]::uuid[])
            FROM branch b
@@ -41,10 +40,9 @@ async fn branches(State(state): State<AppState>) -> Result<Json<Vec<BranchView>>
                 id: r.0,
                 code: r.1,
                 name: r.2,
-                address: r.3,
-                timezone: r.4,
-                status: r.5,
-                class_type_ids: r.6,
+                timezone: r.3,
+                status: r.4,
+                class_type_ids: r.5,
             })
             .collect(),
     ))
@@ -110,14 +108,14 @@ struct PackageView {
     code: String,
     name: String,
     sessions: i32,
-    validity_months: i32,
+    validity_days: i32,
     status: String,
     class_type_ids: Vec<Uuid>,
 }
 
 async fn packages(State(state): State<AppState>) -> Result<Json<Vec<PackageView>>, AppError> {
     let rows: Vec<(Uuid, String, String, i32, i32, String, Vec<Uuid>)> = sqlx::query_as(
-        r#"SELECT cp.id, cp.code, cp.name, cp.sessions, cp.validity_months, cp.status,
+        r#"SELECT cp.id, cp.code, cp.name, cp.sessions, cp.validity_days, cp.status,
                   COALESCE(array_agg(pct.class_type_id ORDER BY ct.name)
                     FILTER (WHERE pct.class_type_id IS NOT NULL), ARRAY[]::uuid[])
            FROM course_package cp
@@ -135,7 +133,7 @@ async fn packages(State(state): State<AppState>) -> Result<Json<Vec<PackageView>
                 code: r.1,
                 name: r.2,
                 sessions: r.3,
-                validity_months: r.4,
+                validity_days: r.4,
                 status: r.5,
                 class_type_ids: r.6,
             })

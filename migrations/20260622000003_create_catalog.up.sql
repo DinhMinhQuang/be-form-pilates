@@ -1,10 +1,10 @@
 CREATE TABLE branch (
-    id        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    code      text NOT NULL UNIQUE,
-    name      text NOT NULL,
-    address   text NOT NULL,
-    timezone  text NOT NULL DEFAULT 'Asia/Ho_Chi_Minh',
-    status    text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled'))
+    id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    code                  text NOT NULL UNIQUE,
+    name                  text NOT NULL,
+    timezone              text NOT NULL DEFAULT 'Asia/Ho_Chi_Minh',
+    status                text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+    haravan_collection_id text UNIQUE
 );
 
 CREATE TABLE class_type (
@@ -19,9 +19,8 @@ CREATE TABLE class_type (
 );
 
 CREATE TABLE branch_class_type (
-    branch_id         uuid NOT NULL REFERENCES branch(id) ON DELETE CASCADE,
-    class_type_id     uuid NOT NULL REFERENCES class_type(id) ON DELETE CASCADE,
-    enabled           boolean NOT NULL DEFAULT true,
-    capacity_override int CHECK (capacity_override BETWEEN 1 AND 6),
+    branch_id     uuid NOT NULL REFERENCES branch(id) ON DELETE CASCADE,
+    class_type_id uuid NOT NULL REFERENCES class_type(id) ON DELETE CASCADE,
+    enabled       boolean NOT NULL DEFAULT true,
     PRIMARY KEY (branch_id, class_type_id)
 );

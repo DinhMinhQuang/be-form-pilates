@@ -3,7 +3,8 @@ CREATE TABLE course_package (
     code             text NOT NULL UNIQUE,
     name             text NOT NULL,
     sessions         int NOT NULL CHECK (sessions > 0),
-    validity_months  int NOT NULL CHECK (validity_months > 0),
+    validity_days    int NOT NULL DEFAULT 0 CHECK (validity_days >= 0),
+    haravan_sku      text UNIQUE,
     status           text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled'))
 );
 

@@ -38,8 +38,17 @@ async fn main() -> anyhow::Result<()> {
         .await
         .expect("Failed to run migrations");
 
+    let sync_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(6 * 60 * 60));
+        loop {
+            interval.tick().await;
+            integration::haravan_sync::sync_products(&sync_pool).await;
+        }
+    });
+
     let app = router(AppState { pool });
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3355").await?;
     tracing::info!("listening on :8080");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
