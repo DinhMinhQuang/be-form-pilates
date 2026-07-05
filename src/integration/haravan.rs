@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use chrono::{DateTime, Months, Utc};
+use chrono::{DateTime, Duration, Utc};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -191,14 +191,14 @@ pub async fn order_paid(
         };
         let variant_id = value_id(variant)?;
         let mapping: Option<(Uuid, i32, i32)> = sqlx::query_as(
-            r#"SELECT cp.id, cp.sessions, cp.validity_months
+            r#"SELECT cp.id, cp.sessions, cp.validity_days
                FROM haravan_product_mapping m JOIN course_package cp ON cp.id = m.package_id
                WHERE m.haravan_variant_id = $1 AND m.active AND cp.status = 'active'"#,
         )
         .bind(&variant_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((package_id, sessions, validity_months)) = mapping else {
+        let Some((package_id, sessions, validity_days)) = mapping else {
             tracing::warn!(variant_id, "Haravan variant has no active package mapping");
             continue;
         };
@@ -212,9 +212,11 @@ pub async fn order_paid(
         let total_sessions = sessions
             .checked_mul(item.quantity)
             .ok_or(AppError::InvalidInput("quantity_too_large"))?;
-        let expires_at = activated_at
-            .checked_add_months(Months::new(validity_months as u32))
-            .ok_or(AppError::Integration("invalid_package_validity"))?;
+        let expires_at = if validity_days > 0 {
+            activated_at + Duration::days(validity_days as i64 * item.quantity as i64)
+        } else {
+            activated_at + Duration::days(36500) // 100 năm = không hết hạn
+        };
         let (lot_id,): (Uuid,) = sqlx::query_as(
             r#"INSERT INTO credit_lot
                  (student_id, package_id, order_item_id, sessions_total, sessions_remaining, activated_at, expires_at)

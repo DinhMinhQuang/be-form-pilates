@@ -19,14 +19,15 @@ pub struct MeResponse {
     full_name: String,
     email: Option<String>,
     phone: Option<String>,
+    status: String,
 }
 
 pub async fn me(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<MeResponse>, AppError> {
-    let row: (String, String, Option<String>, Option<String>) =
-        sqlx::query_as("SELECT role, full_name, email, phone FROM app_user WHERE id = $1")
+    let row: (String, String, Option<String>, Option<String>, String) =
+        sqlx::query_as("SELECT role, full_name, email, phone, status FROM app_user WHERE id = $1")
             .bind(user.id)
             .fetch_one(&state.pool)
             .await?;
@@ -36,6 +37,7 @@ pub async fn me(
         full_name: row.1,
         email: row.2,
         phone: row.3,
+        status: row.4,
     }))
 }
 

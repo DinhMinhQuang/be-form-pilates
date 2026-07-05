@@ -1,4 +1,5 @@
 mod haravan;
+pub mod haravan_sync;
 
 use crate::state::AppState;
 use axum::{

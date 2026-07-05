@@ -37,8 +37,8 @@ pub async fn create_session(
     if input.end_at <= input.start_at || input.start_at <= Utc::now() {
         return Err(AppError::InvalidInput("invalid_session_time"));
     }
-    let config: Option<(i32, Option<i32>)> = sqlx::query_as(
-        r#"SELECT ct.default_capacity, bct.capacity_override
+    let config: Option<(i32,)> = sqlx::query_as(
+        r#"SELECT ct.default_capacity
            FROM branch_class_type bct JOIN class_type ct ON ct.id = bct.class_type_id
            WHERE bct.branch_id = $1 AND bct.class_type_id = $2 AND bct.enabled"#,
     )
@@ -46,12 +46,9 @@ pub async fn create_session(
     .bind(input.class_type_id)
     .fetch_optional(&state.pool)
     .await?;
-    let (default_capacity, override_capacity) =
+    let (default_capacity,) =
         config.ok_or(AppError::InvalidInput("class_not_available_at_branch"))?;
-    let capacity = input
-        .capacity
-        .or(override_capacity)
-        .unwrap_or(default_capacity);
+    let capacity = input.capacity.unwrap_or(default_capacity);
     if !(1..=6).contains(&capacity) {
         return Err(AppError::InvalidInput("invalid_capacity"));
     }
