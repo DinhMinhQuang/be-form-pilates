@@ -41,14 +41,16 @@ pub async fn lock_session(
 
     match row {
         None => Ok(None),
-        Some((capacity, booked_count, status, class_type_id, branch_id, start_at)) => Ok(Some(SessionRow {
-            capacity,
-            booked_count,
-            status,
-            class_type_id,
-            branch_id,
-            start_at,
-        })),
+        Some((capacity, booked_count, status, class_type_id, branch_id, start_at)) => {
+            Ok(Some(SessionRow {
+                capacity,
+                booked_count,
+                status,
+                class_type_id,
+                branch_id,
+                start_at,
+            }))
+        }
     }
 }
 

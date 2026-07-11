@@ -895,12 +895,11 @@ pub async fn create_credit_lot(
     if input.expires_at <= Utc::now() {
         return Err(AppError::InvalidInput("invalid_expiry"));
     }
-    let student_ok: (bool,) = sqlx::query_as(
-        "SELECT EXISTS(SELECT 1 FROM app_user WHERE id = $1 AND role = 'student')",
-    )
-    .bind(student_id)
-    .fetch_one(&state.pool)
-    .await?;
+    let student_ok: (bool,) =
+        sqlx::query_as("SELECT EXISTS(SELECT 1 FROM app_user WHERE id = $1 AND role = 'student')")
+            .bind(student_id)
+            .fetch_one(&state.pool)
+            .await?;
     if !student_ok.0 {
         return Err(AppError::BookingNotFound);
     }
