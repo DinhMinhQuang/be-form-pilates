@@ -30,7 +30,9 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/admin/students/:id",
-            get(handlers::student_detail).patch(handlers::update_student),
+            get(handlers::student_detail)
+                .patch(handlers::update_student)
+                .delete(handlers::delete_student),
         )
         .route("/admin/bookings", get(handlers::bookings))
         .route(
@@ -40,6 +42,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/admin/bookings/:id/cancel",
             post(handlers::cancel_for_student),
+        )
+        .route(
+            "/admin/students/:student_id/credits",
+            post(handlers::create_credit_lot),
         )
         .route(
             "/admin/students/:student_id/credits/:lot_id",
