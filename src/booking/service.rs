@@ -39,11 +39,16 @@ pub async fn book_class(
         return Err(AppError::SessionFull);
     }
 
-    // 2. Khóa lot sẽ trừ. Không có lot hợp lệ = hết buổi hoặc hết hạn.
-    let lot_id =
-        queries::pick_credit_lot(&mut tx, student_id, session.class_type_id, session.start_at)
-            .await?
-            .ok_or(AppError::NoValidCredit)?;
+    // 2. Khóa lot sẽ trừ. Không có lot hợp lệ = hết buổi, hết hạn, hoặc sai chi nhánh.
+    let lot_id = queries::pick_credit_lot(
+        &mut tx,
+        student_id,
+        session.class_type_id,
+        session.branch_id,
+        session.start_at,
+    )
+    .await?
+    .ok_or(AppError::NoValidCredit)?;
 
     // 3. Insert booking. Unique(session_id, student_id) là lớp chặn cuối cho double-book.
     let booking_id =

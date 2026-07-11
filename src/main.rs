@@ -3,6 +3,7 @@ mod auth;
 mod booking;
 mod catalog;
 mod domain;
+mod email;
 mod error;
 mod integration;
 mod middleware;
@@ -46,6 +47,8 @@ async fn main() -> anyhow::Result<()> {
             integration::haravan_sync::sync_products(&sync_pool).await;
         }
     });
+
+    tokio::spawn(email::start_worker(pool.clone()));
 
     let app = router(AppState { pool });
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3355").await?;

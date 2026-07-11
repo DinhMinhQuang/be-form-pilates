@@ -10,8 +10,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/trainer/sessions", get(handlers::sessions))
         .route("/trainer/sessions/:id/students", get(handlers::students))
+        .route("/trainer/students", get(handlers::search_students))
+        .route("/trainer/bookings/:id/attendance", post(handlers::attendance))
         .route(
-            "/trainer/bookings/:id/attendance",
-            post(handlers::attendance),
+            "/trainer/students/:student_id/sessions/:session_id/book",
+            post(handlers::book_for_student),
         )
 }

@@ -12,6 +12,7 @@ pub struct SessionRow {
     pub booked_count: i32,
     pub status: String,
     pub class_type_id: Uuid,
+    pub branch_id: Uuid,
     pub start_at: DateTime<Utc>,
 }
 
@@ -28,8 +29,8 @@ pub async fn lock_session(
     conn: &mut PgConnection,
     session_id: Uuid,
 ) -> Result<Option<SessionRow>, AppError> {
-    let row: Option<(i32, i32, String, Uuid, DateTime<Utc>)> = sqlx::query_as(
-        r#"SELECT cs.capacity, cs.booked_count, cs.status, cs.class_type_id, cs.start_at
+    let row: Option<(i32, i32, String, Uuid, Uuid, DateTime<Utc>)> = sqlx::query_as(
+        r#"SELECT cs.capacity, cs.booked_count, cs.status, cs.class_type_id, cs.branch_id, cs.start_at
            FROM class_session cs
            WHERE cs.id = $1
            FOR UPDATE OF cs"#,
@@ -40,11 +41,12 @@ pub async fn lock_session(
 
     match row {
         None => Ok(None),
-        Some((capacity, booked_count, status, class_type_id, start_at)) => Ok(Some(SessionRow {
+        Some((capacity, booked_count, status, class_type_id, branch_id, start_at)) => Ok(Some(SessionRow {
             capacity,
             booked_count,
             status,
             class_type_id,
+            branch_id,
             start_at,
         })),
     }
@@ -55,6 +57,7 @@ pub async fn pick_credit_lot(
     conn: &mut PgConnection,
     student_id: Uuid,
     class_type_id: Uuid,
+    branch_id: Uuid,
     session_start_at: DateTime<Utc>,
 ) -> Result<Option<Uuid>, AppError> {
     let row: Option<(Uuid,)> = sqlx::query_as(
@@ -62,16 +65,18 @@ pub async fn pick_credit_lot(
            JOIN package_class_type pct ON pct.package_id = cl.package_id
            WHERE cl.student_id = $1
              AND pct.class_type_id = $2
+             AND (cl.branch_id IS NULL OR cl.branch_id = $3)
              AND cl.sessions_remaining > 0
              AND cl.status = 'active'
              AND cl.activated_at <= now()
-             AND cl.expires_at >= $3
+             AND cl.expires_at >= $4
            ORDER BY cl.expires_at ASC
            LIMIT 1
            FOR UPDATE OF cl"#,
     )
     .bind(student_id)
     .bind(class_type_id)
+    .bind(branch_id)
     .bind(session_start_at)
     .fetch_optional(conn)
     .await?;

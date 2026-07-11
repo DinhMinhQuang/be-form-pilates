@@ -190,15 +190,15 @@ pub async fn order_paid(
             continue;
         };
         let variant_id = value_id(variant)?;
-        let mapping: Option<(Uuid, i32, i32)> = sqlx::query_as(
-            r#"SELECT cp.id, cp.sessions, cp.validity_days
+        let mapping: Option<(Uuid, i32, i32, Option<Uuid>)> = sqlx::query_as(
+            r#"SELECT cp.id, cp.sessions, cp.validity_days, m.branch_id
                FROM haravan_product_mapping m JOIN course_package cp ON cp.id = m.package_id
                WHERE m.haravan_variant_id = $1 AND m.active AND cp.status = 'active'"#,
         )
         .bind(&variant_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((package_id, sessions, validity_days)) = mapping else {
+        let Some((package_id, sessions, validity_days, branch_id)) = mapping else {
             tracing::warn!(variant_id, "Haravan variant has no active package mapping");
             continue;
         };
@@ -219,10 +219,10 @@ pub async fn order_paid(
         };
         let (lot_id,): (Uuid,) = sqlx::query_as(
             r#"INSERT INTO credit_lot
-                 (student_id, package_id, order_item_id, sessions_total, sessions_remaining, activated_at, expires_at)
-               VALUES ($1, $2, $3, $4, $4, $5, $6) RETURNING id"#,
+                 (student_id, package_id, order_item_id, sessions_total, sessions_remaining, activated_at, expires_at, branch_id)
+               VALUES ($1, $2, $3, $4, $4, $5, $6, $7) RETURNING id"#,
         ).bind(student_id).bind(package_id).bind(order_item_id).bind(total_sessions)
-            .bind(activated_at).bind(expires_at).fetch_one(&mut *tx).await?;
+            .bind(activated_at).bind(expires_at).bind(branch_id).fetch_one(&mut *tx).await?;
         sqlx::query(
             r#"INSERT INTO credit_ledger
                  (student_id, lot_id, integration_event_id, delta, balance_after, reason, metadata)

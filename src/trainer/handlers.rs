@@ -6,7 +6,15 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{auth::AuthTrainer, error::AppError, state::AppState};
+use axum::http::StatusCode;
+
+use crate::{
+    auth::AuthTrainer,
+    booking::service as booking_service,
+    domain::BookingChannel,
+    error::AppError,
+    state::AppState,
+};
 
 #[derive(Deserialize)]
 pub struct RangeQuery {
@@ -131,6 +139,65 @@ pub async fn attendance(
         return Err(AppError::Conflict);
     }
     Ok(Json(serde_json::json!({"updated": true})))
+}
+
+#[derive(Deserialize)]
+pub struct StudentSearchQuery {
+    q: String,
+}
+
+#[derive(Serialize)]
+pub struct StudentSearchResult {
+    id: Uuid,
+    full_name: String,
+    phone: Option<String>,
+}
+
+pub async fn search_students(
+    State(state): State<AppState>,
+    _trainer: AuthTrainer,
+    Query(query): Query<StudentSearchQuery>,
+) -> Result<Json<Vec<StudentSearchResult>>, AppError> {
+    let q = query.q.trim();
+    if q.len() < 2 {
+        return Err(AppError::InvalidInput("query_too_short"));
+    }
+    let like = format!("%{}%", q);
+    let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+        r#"SELECT id, full_name, phone FROM app_user
+           WHERE role = 'student' AND status = 'active'
+             AND (full_name ILIKE $1 OR phone ILIKE $1)
+           ORDER BY full_name LIMIT 20"#,
+    )
+    .bind(&like)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| StudentSearchResult {
+                id: r.0,
+                full_name: r.1,
+                phone: r.2,
+            })
+            .collect(),
+    ))
+}
+
+pub async fn book_for_student(
+    State(state): State<AppState>,
+    trainer: AuthTrainer,
+    Path((student_id, session_id)): Path<(Uuid, Uuid)>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    ensure_assigned(&state, trainer.0, session_id).await?;
+    let id = booking_service::book_class(
+        &state.pool,
+        student_id,
+        session_id,
+        trainer.0,
+        BookingChannel::Admin,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(serde_json::json!({"booking_id": id}))))
 }
 
 async fn ensure_assigned(

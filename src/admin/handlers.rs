@@ -579,6 +579,20 @@ pub async fn create_student(
 }
 
 #[derive(Serialize)]
+pub struct CreditLotView {
+    id: Uuid,
+    package_id: Uuid,
+    package_name: String,
+    sessions_total: i32,
+    sessions_remaining: i32,
+    activated_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    status: String,
+    branch_id: Option<Uuid>,
+    branch_name: Option<String>,
+}
+
+#[derive(Serialize)]
 pub struct StudentDetail {
     id: Uuid,
     full_name: String,
@@ -587,6 +601,7 @@ pub struct StudentDetail {
     status: String,
     notes: Option<String>,
     credits: i64,
+    credit_lots: Vec<CreditLotView>,
 }
 
 pub async fn student_detail(
@@ -615,6 +630,31 @@ pub async fn student_detail(
     .fetch_optional(&state.pool)
     .await?;
     let r = row.ok_or(AppError::BookingNotFound)?;
+
+    let lot_rows: Vec<(
+        Uuid,
+        Uuid,
+        String,
+        i32,
+        i32,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        String,
+        Option<Uuid>,
+        Option<String>,
+    )> = sqlx::query_as(
+        r#"SELECT cl.id, cp.id, cp.name, cl.sessions_total, cl.sessions_remaining,
+                  cl.activated_at, cl.expires_at, cl.status, cl.branch_id, br.name
+           FROM credit_lot cl
+           JOIN course_package cp ON cp.id = cl.package_id
+           LEFT JOIN branch br ON br.id = cl.branch_id
+           WHERE cl.student_id = $1
+           ORDER BY cl.expires_at"#,
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await?;
+
     Ok(Json(StudentDetail {
         id: r.0,
         full_name: r.1,
@@ -623,6 +663,21 @@ pub async fn student_detail(
         status: r.4,
         notes: r.5,
         credits: r.6,
+        credit_lots: lot_rows
+            .into_iter()
+            .map(|l| CreditLotView {
+                id: l.0,
+                package_id: l.1,
+                package_name: l.2,
+                sessions_total: l.3,
+                sessions_remaining: l.4,
+                activated_at: l.5,
+                expires_at: l.6,
+                status: l.7,
+                branch_id: l.8,
+                branch_name: l.9,
+            })
+            .collect(),
     }))
 }
 
@@ -801,6 +856,91 @@ pub async fn cancel_for_student(
 ) -> Result<Json<serde_json::Value>, AppError> {
     service::cancel_booking(&state.pool, id, admin.0, true).await?;
     Ok(Json(serde_json::json!({"refunded": true})))
+}
+
+pub async fn delete_student(
+    State(state): State<AppState>,
+    _admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    let result = sqlx::query(
+        "UPDATE app_user SET status = 'disabled', updated_at = now() WHERE id = $1 AND role = 'student'",
+    )
+    .bind(id)
+    .execute(&state.pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::BookingNotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct CreateCreditLotInput {
+    package_id: Uuid,
+    sessions_total: i32,
+    expires_at: DateTime<Utc>,
+    branch_id: Option<Uuid>,
+}
+
+pub async fn create_credit_lot(
+    State(state): State<AppState>,
+    admin: AuthAdmin,
+    Path(student_id): Path<Uuid>,
+    Json(input): Json<CreateCreditLotInput>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    if input.sessions_total <= 0 {
+        return Err(AppError::InvalidInput("invalid_sessions_total"));
+    }
+    if input.expires_at <= Utc::now() {
+        return Err(AppError::InvalidInput("invalid_expiry"));
+    }
+    let student_ok: (bool,) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM app_user WHERE id = $1 AND role = 'student')",
+    )
+    .bind(student_id)
+    .fetch_one(&state.pool)
+    .await?;
+    if !student_ok.0 {
+        return Err(AppError::BookingNotFound);
+    }
+    let package_ok: (bool,) =
+        sqlx::query_as("SELECT EXISTS(SELECT 1 FROM course_package WHERE id = $1)")
+            .bind(input.package_id)
+            .fetch_one(&state.pool)
+            .await?;
+    if !package_ok.0 {
+        return Err(AppError::InvalidInput("invalid_package"));
+    }
+
+    let mut tx = state.pool.begin().await?;
+    let (lot_id,): (Uuid,) = sqlx::query_as(
+        r#"INSERT INTO credit_lot
+             (student_id, package_id, sessions_total, sessions_remaining, activated_at, expires_at, status, branch_id)
+           VALUES ($1, $2, $3, $3, now(), $4, 'active', $5) RETURNING id"#,
+    )
+    .bind(student_id)
+    .bind(input.package_id)
+    .bind(input.sessions_total)
+    .bind(input.expires_at)
+    .bind(input.branch_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO credit_ledger (student_id, lot_id, delta, balance_after, reason, actor_id)
+           VALUES ($1, $2, $3, $3, 'admin_manual_grant', $4)"#,
+    )
+    .bind(student_id)
+    .bind(lot_id)
+    .bind(input.sessions_total)
+    .bind(admin.0)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"lot_id": lot_id})),
+    ))
 }
 
 #[derive(Deserialize)]
