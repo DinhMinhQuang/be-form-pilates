@@ -9,11 +9,8 @@ use uuid::Uuid;
 use axum::http::StatusCode;
 
 use crate::{
-    auth::AuthTrainer,
-    booking::service as booking_service,
-    domain::BookingChannel,
-    error::AppError,
-    state::AppState,
+    auth::AuthTrainer, booking::service as booking_service, domain::BookingChannel,
+    error::AppError, state::AppState,
 };
 
 #[derive(Deserialize)]
@@ -197,7 +194,10 @@ pub async fn book_for_student(
         BookingChannel::Admin,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(serde_json::json!({"booking_id": id}))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"booking_id": id})),
+    ))
 }
 
 async fn ensure_assigned(

@@ -1,6 +1,5 @@
 use lettre::{
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
-    message::header::ContentType,
+    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor, message::header::ContentType,
     transport::smtp::authentication::Credentials,
 };
 use serde_json::Value;
@@ -31,11 +30,7 @@ pub async fn start_worker(pool: PgPool) {
     }
 }
 
-async fn flush(
-    pool: &PgPool,
-    mailer: &AsyncSmtpTransport<Tokio1Executor>,
-    from: &str,
-) {
+async fn flush(pool: &PgPool, mailer: &AsyncSmtpTransport<Tokio1Executor>, from: &str) {
     let rows: Vec<(Uuid, String, String, Value)> = match sqlx::query_as(
         r#"SELECT id, recipient, template, payload
            FROM email_outbox
