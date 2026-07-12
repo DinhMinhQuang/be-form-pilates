@@ -244,7 +244,7 @@ pub async fn order_paid(
     if let Some(recipient) = email {
         let magic_token = auth::issue_magic_link(&mut tx, student_id).await?;
         let base_url = std::env::var("MAGIC_LINK_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:3000/auth/magic".to_owned());
+            .unwrap_or_else(|_| "http://localhost:3000/magic".to_owned());
         sqlx::query("INSERT INTO email_outbox (recipient, template, payload) VALUES ($1, 'order_confirmed_magic_link', $2)")
             .bind(recipient).bind(json!({"url": format!("{base_url}?token={magic_token}"), "external_order_id": external_order_id}))
             .execute(&mut *tx).await?;
