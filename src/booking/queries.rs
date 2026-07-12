@@ -85,6 +85,41 @@ pub async fn pick_credit_lot(
     Ok(row.map(|(id,)| id))
 }
 
+pub async fn has_time_conflict(
+    conn: &mut PgConnection,
+    student_id: Uuid,
+    session_id: Uuid,
+) -> Result<bool, AppError> {
+    let row: (bool,) = sqlx::query_as(
+        r#"SELECT EXISTS (
+            SELECT 1 FROM booking bk
+            JOIN class_session cs ON cs.id = bk.session_id
+            JOIN class_session target ON target.id = $2
+            WHERE bk.student_id = $1
+              AND bk.session_id != $2
+              AND bk.status = 'booked'
+              AND cs.start_at < target.end_at
+              AND cs.end_at > target.start_at
+        )"#,
+    )
+    .bind(student_id)
+    .bind(session_id)
+    .fetch_one(conn)
+    .await?;
+    Ok(row.0)
+}
+
+pub async fn get_student_name(
+    conn: &mut PgConnection,
+    student_id: Uuid,
+) -> Result<String, AppError> {
+    let row: (String,) = sqlx::query_as("SELECT full_name FROM app_user WHERE id = $1")
+        .bind(student_id)
+        .fetch_one(conn)
+        .await?;
+    Ok(row.0)
+}
+
 pub async fn insert_booking(
     conn: &mut PgConnection,
     session_id: Uuid,

@@ -32,14 +32,23 @@ pub async fn book_class(
     if session.status != "scheduled" {
         return Err(AppError::SessionNotBookable);
     }
-    if session.start_at <= Utc::now() {
+    if channel == BookingChannel::Student && session.start_at <= Utc::now() {
         return Err(AppError::SessionNotBookable);
     }
     if session.booked_count >= session.capacity {
         return Err(AppError::SessionFull);
     }
 
-    // 2. Khóa lot sẽ trừ. Không có lot hợp lệ = hết buổi, hết hạn, hoặc sai chi nhánh.
+    // 2. Kiểm tra trùng lịch học.
+    if queries::has_time_conflict(&mut tx, student_id, session_id).await? {
+        if channel == BookingChannel::Student {
+            return Err(AppError::ScheduleConflict);
+        }
+        let name = queries::get_student_name(&mut tx, student_id).await?;
+        return Err(AppError::ScheduleConflictNamed(name));
+    }
+
+    // 3. Khóa lot sẽ trừ. Không có lot hợp lệ = hết buổi, hết hạn, hoặc sai chi nhánh.
     let lot_id = queries::pick_credit_lot(
         &mut tx,
         student_id,

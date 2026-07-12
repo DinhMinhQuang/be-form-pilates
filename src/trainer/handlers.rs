@@ -28,6 +28,7 @@ pub struct TrainerSession {
     end_at: DateTime<Utc>,
     booked_count: i32,
     capacity: i32,
+    status: String,
 }
 
 pub async fn sessions(
@@ -40,8 +41,8 @@ pub async fn sessions(
     if to <= from || to - from > Duration::days(93) {
         return Err(AppError::InvalidInput("invalid_schedule_range"));
     }
-    let rows: Vec<(Uuid, String, String, DateTime<Utc>, DateTime<Utc>, i32, i32)> = sqlx::query_as(
-        r#"SELECT cs.id, ct.name, br.name, cs.start_at, cs.end_at, cs.booked_count, cs.capacity
+    let rows: Vec<(Uuid, String, String, DateTime<Utc>, DateTime<Utc>, i32, i32, String)> = sqlx::query_as(
+        r#"SELECT cs.id, ct.name, br.name, cs.start_at, cs.end_at, cs.booked_count, cs.capacity, cs.status
            FROM class_session cs JOIN class_type ct ON ct.id = cs.class_type_id
            JOIN branch br ON br.id = cs.branch_id
            JOIN app_user actor ON actor.id = $1
@@ -63,6 +64,7 @@ pub async fn sessions(
                 end_at: r.4,
                 booked_count: r.5,
                 capacity: r.6,
+                status: r.7,
             })
             .collect(),
     ))
@@ -191,7 +193,7 @@ pub async fn book_for_student(
         student_id,
         session_id,
         trainer.0,
-        BookingChannel::Admin,
+        BookingChannel::Trainer,
     )
     .await?;
     Ok((

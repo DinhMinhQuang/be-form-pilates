@@ -25,9 +25,10 @@ impl BookingStatus {
 // Ai bấm nút: student tự đặt, hay admin đặt dùm. Cùng một service.
 // Admin chưa dùng trong slice này (sẽ dùng ở feature admin) nên allow dead_code.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BookingChannel {
     Student,
+    Trainer,
     Admin,
 }
 
@@ -35,6 +36,7 @@ impl BookingChannel {
     pub fn as_str(self) -> &'static str {
         match self {
             BookingChannel::Student => "student",
+            BookingChannel::Trainer => "trainer",
             BookingChannel::Admin => "admin",
         }
     }
