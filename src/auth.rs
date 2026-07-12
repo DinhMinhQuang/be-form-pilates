@@ -179,7 +179,7 @@ async fn request_magic_link(
         let token = issue_magic_link(&mut tx, student_id).await?;
         if let Some(recipient) = recipient {
             let base_url = std::env::var("MAGIC_LINK_BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:3000/auth/magic".to_owned());
+                .unwrap_or_else(|_| "http://localhost:3000/magic".to_owned());
             sqlx::query("INSERT INTO email_outbox (recipient, template, payload) VALUES ($1, 'magic_link', $2)")
                 .bind(recipient)
                 .bind(serde_json::json!({"url": format!("{base_url}?token={token}")}))

@@ -68,7 +68,7 @@ pub async fn create_session(
     .fetch_one(&state.pool)
     .await?;
     if overlap.0 {
-        return Err(AppError::Conflict);
+        return Err(AppError::InvalidInput("trainer_schedule_conflict"));
     }
     let (id,): (Uuid,) = sqlx::query_as(
         r#"INSERT INTO class_session
