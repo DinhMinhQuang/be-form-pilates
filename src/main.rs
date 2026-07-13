@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
 
     let sync_pool = pool.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(6 * 60 * 60));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(15 * 60));
         loop {
             interval.tick().await;
             integration::haravan_sync::sync_products(&sync_pool).await;

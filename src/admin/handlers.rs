@@ -19,6 +19,8 @@ use crate::{
     state::AppState,
 };
 
+const MAX_SESSION_DURATION: Duration = Duration::hours(2);
+
 #[derive(Deserialize)]
 pub struct CreateSessionInput {
     branch_id: Uuid,
@@ -34,7 +36,10 @@ pub async fn create_session(
     admin: AuthAdmin,
     Json(input): Json<CreateSessionInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
-    if input.end_at <= input.start_at || input.start_at <= Utc::now() {
+    if input.end_at <= input.start_at
+        || input.start_at <= Utc::now()
+        || input.end_at - input.start_at > MAX_SESSION_DURATION
+    {
         return Err(AppError::InvalidInput("invalid_session_time"));
     }
     let config: Option<(i32,)> = sqlx::query_as(
@@ -228,7 +233,11 @@ pub async fn update_session(
     let next_start = input.start_at.unwrap_or(start_at);
     let next_end = input.end_at.unwrap_or(end_at);
     let next_capacity = input.capacity.unwrap_or(capacity);
-    if next_end <= next_start || next_capacity < booked_count || !(1..=6).contains(&next_capacity) {
+    if next_end <= next_start
+        || next_end - next_start > MAX_SESSION_DURATION
+        || next_capacity < booked_count
+        || !(1..=6).contains(&next_capacity)
+    {
         return Err(AppError::InvalidInput("invalid_session_update"));
     }
     let available: (bool,) = sqlx::query_as(

@@ -7,14 +7,24 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 fn build_mailer() -> Option<(AsyncSmtpTransport<Tokio1Executor>, String)> {
-    let username = std::env::var("GMAIL_USERNAME").ok()?;
-    let app_password = std::env::var("GMAIL_APP_PASSWORD").ok()?;
-    let from = std::env::var("GMAIL_FROM").unwrap_or_else(|_| username.clone());
-    let creds = Credentials::new(username, app_password);
-    let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay("smtp.gmail.com")
-        .expect("failed to build SMTP transport")
-        .credentials(creds)
-        .build();
+    let host = std::env::var("SMTP_HOST").ok()?;
+    let username = std::env::var("SMTP_USERNAME").ok()?;
+    let password = std::env::var("SMTP_PASSWORD").ok()?;
+    let port: u16 = std::env::var("SMTP_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(465);
+    let from = std::env::var("SMTP_FROM").unwrap_or_else(|_| username.clone());
+    let creds = Credentials::new(username, password);
+    let mailer = if port == 587 {
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
+    } else {
+        AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
+    }
+    .expect("failed to build SMTP transport")
+    .port(port)
+    .credentials(creds)
+    .build();
     Some((mailer, from))
 }
 
