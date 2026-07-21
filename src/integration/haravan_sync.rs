@@ -48,11 +48,13 @@ fn regex_capture(s: &str, pattern: &str) -> Option<i32> {
 // SKU prefix → danh sách category của class_type cần mở cho branch
 fn sku_to_categories(sku: &str) -> &'static [&'static str] {
     if sku.starts_with("reformer-duo") {
-        &["group_reformer", "duo"]
+        &["duo"]
     } else if sku.starts_with("reformer-private") {
-        &["group_reformer", "private"]
+        &["private"]
     } else if sku.starts_with("mat-") {
         &["group_mat"]
+    } else if sku.starts_with("reformer-") {
+        &["group_reformer"]
     } else {
         &[]
     }
