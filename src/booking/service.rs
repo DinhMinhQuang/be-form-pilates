@@ -11,6 +11,10 @@ use crate::error::AppError;
 
 const CANCEL_WINDOW: Duration = Duration::hours(6);
 
+pub async fn sweep_completed_sessions(pool: &PgPool) -> Result<u64, AppError> {
+    queries::sweep_completed_sessions(pool).await
+}
+
 pub struct CancelOutcome {
     pub refunded: bool,
 }
@@ -32,7 +36,7 @@ pub async fn book_class(
     if session.status != "scheduled" {
         return Err(AppError::SessionNotBookable);
     }
-    if channel == BookingChannel::Student && session.start_at <= Utc::now() {
+    if session.start_at <= Utc::now() {
         return Err(AppError::SessionNotBookable);
     }
     if session.booked_count >= session.capacity {
