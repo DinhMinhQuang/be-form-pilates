@@ -7,6 +7,19 @@ use uuid::Uuid;
 use crate::domain::{BookingChannel, BookingStatus};
 use crate::error::AppError;
 
+// Không có consumer nào transition status khi session trôi qua end_at — quét định kỳ
+// để class_session.status phản ánh đúng thực tế cho các nơi đọc cột này trực tiếp
+// (student browse, trainer schedule), thay vì mỗi query phải tự tính lại bằng CASE WHEN.
+pub async fn sweep_completed_sessions(pool: &sqlx::PgPool) -> Result<u64, AppError> {
+    let result = sqlx::query(
+        r#"UPDATE class_session SET status = 'completed'
+           WHERE status = 'scheduled' AND end_at < now()"#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 pub struct SessionRow {
     pub capacity: i32,
     pub booked_count: i32,

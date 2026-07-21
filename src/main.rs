@@ -48,6 +48,19 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let sweep_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
+        loop {
+            interval.tick().await;
+            match booking::service::sweep_completed_sessions(&sweep_pool).await {
+                Ok(n) if n > 0 => tracing::info!(count = n, "sessions swept to completed"),
+                Ok(_) => {}
+                Err(e) => tracing::error!(error = %e, "failed to sweep completed sessions"),
+            }
+        }
+    });
+
     tokio::spawn(email::start_worker(pool.clone()));
 
     let app = router(AppState { pool });

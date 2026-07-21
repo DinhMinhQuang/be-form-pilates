@@ -152,17 +152,24 @@ pub async fn sessions(
         i32,
         String,
     )> = sqlx::query_as(
-        r#"SELECT cs.id, br.id, br.name, ct.id, ct.name, trainer.id, trainer.full_name,
-                  cs.start_at, cs.end_at, cs.capacity, cs.booked_count, cs.status
-           FROM class_session cs
-           JOIN branch br ON br.id = cs.branch_id
-           JOIN class_type ct ON ct.id = cs.class_type_id
-           LEFT JOIN app_user trainer ON trainer.id = cs.trainer_id
-           WHERE cs.start_at >= $1 AND cs.start_at < $2
-             AND ($3::uuid IS NULL OR cs.branch_id = $3)
-             AND ($4::uuid IS NULL OR cs.trainer_id = $4)
-             AND ($5::text IS NULL OR cs.status = $5)
-           ORDER BY cs.start_at DESC
+        r#"WITH sess AS (
+               SELECT cs.id, cs.branch_id, cs.class_type_id, cs.trainer_id,
+                      cs.start_at, cs.end_at, cs.capacity, cs.booked_count,
+                      CASE WHEN cs.status = 'scheduled' AND cs.end_at < now()
+                           THEN 'completed' ELSE cs.status END AS status
+               FROM class_session cs
+           )
+           SELECT sess.id, br.id, br.name, ct.id, ct.name, trainer.id, trainer.full_name,
+                  sess.start_at, sess.end_at, sess.capacity, sess.booked_count, sess.status
+           FROM sess
+           JOIN branch br ON br.id = sess.branch_id
+           JOIN class_type ct ON ct.id = sess.class_type_id
+           LEFT JOIN app_user trainer ON trainer.id = sess.trainer_id
+           WHERE sess.start_at >= $1 AND sess.start_at < $2
+             AND ($3::uuid IS NULL OR sess.branch_id = $3)
+             AND ($4::uuid IS NULL OR sess.trainer_id = $4)
+             AND ($5::text IS NULL OR sess.status = $5)
+           ORDER BY sess.start_at DESC
            LIMIT 500"#,
     )
     .bind(from)
@@ -599,6 +606,7 @@ pub struct CreditLotView {
     status: String,
     branch_id: Option<Uuid>,
     branch_name: Option<String>,
+    class_type_ids: Vec<Uuid>,
 }
 
 #[derive(Serialize)]
@@ -651,9 +659,15 @@ pub async fn student_detail(
         String,
         Option<Uuid>,
         Option<String>,
+        Vec<Uuid>,
     )> = sqlx::query_as(
         r#"SELECT cl.id, cp.id, cp.name, cl.sessions_total, cl.sessions_remaining,
-                  cl.activated_at, cl.expires_at, cl.status, cl.branch_id, br.name
+                  cl.activated_at, cl.expires_at, cl.status, cl.branch_id, br.name,
+                  COALESCE(
+                      (SELECT array_agg(pct.class_type_id) FROM package_class_type pct
+                       WHERE pct.package_id = cp.id),
+                      '{}'
+                  )
            FROM credit_lot cl
            JOIN course_package cp ON cp.id = cl.package_id
            LEFT JOIN branch br ON br.id = cl.branch_id
@@ -685,6 +699,7 @@ pub async fn student_detail(
                 status: l.7,
                 branch_id: l.8,
                 branch_name: l.9,
+                class_type_ids: l.10,
             })
             .collect(),
     }))
