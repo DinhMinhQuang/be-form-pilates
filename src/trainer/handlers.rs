@@ -93,9 +93,11 @@ pub async fn sessions(
         })
         .collect();
 
-    Ok(Json(pagination::paginate(items, limit, |s| StartAtCursor {
-        start_at: s.start_at,
-        id: s.id,
+    Ok(Json(pagination::paginate(items, limit, |s| {
+        StartAtCursor {
+            start_at: s.start_at,
+            id: s.id,
+        }
     })))
 }
 
@@ -265,12 +267,11 @@ pub async fn change_password(
     if input.new_password.len() < 10 {
         return Err(AppError::InvalidInput("password_too_short"));
     }
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT password_hash FROM staff_credential WHERE user_id = $1",
-    )
-    .bind(trainer.0)
-    .fetch_optional(&state.pool)
-    .await?;
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT password_hash FROM staff_credential WHERE user_id = $1")
+            .bind(trainer.0)
+            .fetch_optional(&state.pool)
+            .await?;
     let (hash,) = row.ok_or(AppError::Unauthorized)?;
     let parsed = PasswordHash::new(&hash).map_err(|_| AppError::Corrupt("password_hash"))?;
     Argon2::default()

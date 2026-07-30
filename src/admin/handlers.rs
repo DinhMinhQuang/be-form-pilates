@@ -213,9 +213,11 @@ pub async fn sessions(
         })
         .collect();
 
-    Ok(Json(pagination::paginate(items, limit, |s| SessionCursor {
-        start_at: s.start_at,
-        id: s.id,
+    Ok(Json(pagination::paginate(items, limit, |s| {
+        SessionCursor {
+            start_at: s.start_at,
+            id: s.id,
+        }
     })))
 }
 
@@ -950,9 +952,11 @@ pub async fn bookings(
         })
         .collect();
 
-    Ok(Json(pagination::paginate(items, limit, |b| BookedAtCursor {
-        booked_at: b.booked_at,
-        id: b.id,
+    Ok(Json(pagination::paginate(items, limit, |b| {
+        BookedAtCursor {
+            booked_at: b.booked_at,
+            id: b.id,
+        }
     })))
 }
 
