@@ -1,3 +1,7 @@
+use argon2::{
+    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
+    password_hash::{SaltString, rand_core::OsRng},
+};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -9,14 +13,20 @@ use uuid::Uuid;
 use axum::http::StatusCode;
 
 use crate::{
-    auth::AuthTrainer, booking::service as booking_service, domain::BookingChannel,
-    error::AppError, state::AppState,
+    auth::AuthTrainer,
+    booking::service as booking_service,
+    domain::BookingChannel,
+    error::AppError,
+    pagination::{self, Page},
+    state::AppState,
 };
 
 #[derive(Deserialize)]
 pub struct RangeQuery {
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
+    cursor: Option<String>,
+    limit: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -31,43 +41,62 @@ pub struct TrainerSession {
     status: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct StartAtCursor {
+    start_at: DateTime<Utc>,
+    id: Uuid,
+}
+
 pub async fn sessions(
     State(state): State<AppState>,
     trainer: AuthTrainer,
     Query(query): Query<RangeQuery>,
-) -> Result<Json<Vec<TrainerSession>>, AppError> {
+) -> Result<Json<Page<TrainerSession>>, AppError> {
     let from = query.from.unwrap_or_else(Utc::now);
     let to = query.to.unwrap_or(from + Duration::days(31));
     if to <= from || to - from > Duration::days(93) {
         return Err(AppError::InvalidInput("invalid_schedule_range"));
     }
+    let limit = pagination::clamp_limit(query.limit);
+    let cursor = pagination::decode_cursor::<StartAtCursor>(query.cursor.as_deref());
+
     let rows: Vec<(Uuid, String, String, DateTime<Utc>, DateTime<Utc>, i32, i32, String)> = sqlx::query_as(
         r#"SELECT cs.id, ct.name, br.name, cs.start_at, cs.end_at, cs.booked_count, cs.capacity, cs.status
            FROM class_session cs JOIN class_type ct ON ct.id = cs.class_type_id
            JOIN branch br ON br.id = cs.branch_id
            JOIN app_user actor ON actor.id = $1
            WHERE (cs.trainer_id = $1 OR actor.role = 'admin')
-             AND cs.start_at >= $2 AND cs.start_at < $3 ORDER BY cs.start_at"#,
+             AND cs.start_at >= $2 AND cs.start_at < $3
+             AND ($4::timestamptz IS NULL OR (cs.start_at, cs.id) > ($4, $5))
+           ORDER BY cs.start_at, cs.id
+           LIMIT $6"#,
     )
     .bind(trainer.0)
     .bind(from)
     .bind(to)
+    .bind(cursor.as_ref().map(|c| c.start_at))
+    .bind(cursor.as_ref().map(|c| c.id))
+    .bind(limit + 1)
     .fetch_all(&state.pool)
     .await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| TrainerSession {
-                id: r.0,
-                class_name: r.1,
-                branch_name: r.2,
-                start_at: r.3,
-                end_at: r.4,
-                booked_count: r.5,
-                capacity: r.6,
-                status: r.7,
-            })
-            .collect(),
-    ))
+    let items: Vec<TrainerSession> = rows
+        .into_iter()
+        .map(|r| TrainerSession {
+            id: r.0,
+            class_name: r.1,
+            branch_name: r.2,
+            start_at: r.3,
+            end_at: r.4,
+            booked_count: r.5,
+            capacity: r.6,
+            status: r.7,
+        })
+        .collect();
+
+    Ok(Json(pagination::paginate(items, limit, |s| StartAtCursor {
+        start_at: s.start_at,
+        id: s.id,
+    })))
 }
 
 #[derive(Serialize)]
@@ -143,6 +172,8 @@ pub async fn attendance(
 #[derive(Deserialize)]
 pub struct StudentSearchQuery {
     q: String,
+    cursor: Option<String>,
+    limit: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -152,34 +183,52 @@ pub struct StudentSearchResult {
     phone: Option<String>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct NameCursor {
+    full_name: String,
+    id: Uuid,
+}
+
 pub async fn search_students(
     State(state): State<AppState>,
     _trainer: AuthTrainer,
     Query(query): Query<StudentSearchQuery>,
-) -> Result<Json<Vec<StudentSearchResult>>, AppError> {
+) -> Result<Json<Page<StudentSearchResult>>, AppError> {
     let q = query.q.trim();
     if q.len() < 2 {
         return Err(AppError::InvalidInput("query_too_short"));
     }
     let like = format!("%{}%", q);
+    let limit = pagination::clamp_limit(query.limit);
+    let cursor = pagination::decode_cursor::<NameCursor>(query.cursor.as_deref());
+
     let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
         r#"SELECT id, full_name, phone FROM app_user
            WHERE role = 'student' AND status = 'active'
              AND (full_name ILIKE $1 OR phone ILIKE $1)
-           ORDER BY full_name LIMIT 20"#,
+             AND ($2::text IS NULL OR (full_name, id) > ($2, $3))
+           ORDER BY full_name, id
+           LIMIT $4"#,
     )
     .bind(&like)
+    .bind(cursor.as_ref().map(|c| c.full_name.clone()))
+    .bind(cursor.as_ref().map(|c| c.id))
+    .bind(limit + 1)
     .fetch_all(&state.pool)
     .await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| StudentSearchResult {
-                id: r.0,
-                full_name: r.1,
-                phone: r.2,
-            })
-            .collect(),
-    ))
+    let items: Vec<StudentSearchResult> = rows
+        .into_iter()
+        .map(|r| StudentSearchResult {
+            id: r.0,
+            full_name: r.1,
+            phone: r.2,
+        })
+        .collect();
+
+    Ok(Json(pagination::paginate(items, limit, |s| NameCursor {
+        full_name: s.full_name.clone(),
+        id: s.id,
+    })))
 }
 
 pub async fn book_for_student(
@@ -200,6 +249,44 @@ pub async fn book_for_student(
         StatusCode::CREATED,
         Json(serde_json::json!({"booking_id": id})),
     ))
+}
+
+#[derive(Deserialize)]
+pub struct ChangePasswordInput {
+    current_password: String,
+    new_password: String,
+}
+
+pub async fn change_password(
+    State(state): State<AppState>,
+    trainer: AuthTrainer,
+    Json(input): Json<ChangePasswordInput>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if input.new_password.len() < 10 {
+        return Err(AppError::InvalidInput("password_too_short"));
+    }
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT password_hash FROM staff_credential WHERE user_id = $1",
+    )
+    .bind(trainer.0)
+    .fetch_optional(&state.pool)
+    .await?;
+    let (hash,) = row.ok_or(AppError::Unauthorized)?;
+    let parsed = PasswordHash::new(&hash).map_err(|_| AppError::Corrupt("password_hash"))?;
+    Argon2::default()
+        .verify_password(input.current_password.as_bytes(), &parsed)
+        .map_err(|_| AppError::InvalidInput("wrong_current_password"))?;
+    let salt = SaltString::generate(&mut OsRng);
+    let new_hash = Argon2::default()
+        .hash_password(input.new_password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|_| AppError::Integration("password_hash_failed"))?;
+    sqlx::query("UPDATE staff_credential SET password_hash = $2 WHERE user_id = $1")
+        .bind(trainer.0)
+        .bind(new_hash)
+        .execute(&state.pool)
+        .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 async fn ensure_assigned(

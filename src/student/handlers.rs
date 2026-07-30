@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::{
     auth::{AuthStudent, AuthUser},
     error::AppError,
+    pagination::{self, Page},
     state::AppState,
 };
 
@@ -46,6 +47,8 @@ pub struct ScheduleQuery {
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
     branch_id: Option<Uuid>,
+    cursor: Option<String>,
+    limit: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -62,16 +65,24 @@ pub struct SessionView {
     available_slots: i32,
 }
 
+#[derive(Serialize, Deserialize)]
+struct StartAtCursor {
+    start_at: DateTime<Utc>,
+    id: Uuid,
+}
+
 pub async fn sessions(
     State(state): State<AppState>,
     _student: AuthStudent,
     Query(query): Query<ScheduleQuery>,
-) -> Result<Json<Vec<SessionView>>, AppError> {
+) -> Result<Json<Page<SessionView>>, AppError> {
     let from = query.from.unwrap_or_else(Utc::now);
     let to = query.to.unwrap_or(from + Duration::days(31));
     if to <= from || to - from > Duration::days(93) {
         return Err(AppError::InvalidInput("invalid_schedule_range"));
     }
+    let limit = pagination::clamp_limit(query.limit);
+    let cursor = pagination::decode_cursor::<StartAtCursor>(query.cursor.as_deref());
 
     let rows: Vec<(
         Uuid,
@@ -93,30 +104,46 @@ pub async fn sessions(
                LEFT JOIN app_user trainer ON trainer.id = cs.trainer_id
                WHERE cs.status = 'scheduled' AND cs.start_at >= $1 AND cs.start_at < $2
                  AND ($3::uuid IS NULL OR cs.branch_id = $3)
-               ORDER BY cs.start_at"#,
+                 AND ($4::timestamptz IS NULL OR (cs.start_at, cs.id) > ($4, $5))
+               ORDER BY cs.start_at, cs.id
+               LIMIT $6"#,
     )
     .bind(from)
     .bind(to)
     .bind(query.branch_id)
+    .bind(cursor.as_ref().map(|c| c.start_at))
+    .bind(cursor.as_ref().map(|c| c.id))
+    .bind(limit + 1)
     .fetch_all(&state.pool)
     .await?;
 
-    Ok(Json(
-        rows.into_iter()
-            .map(|row| SessionView {
-                id: row.0,
-                branch_id: row.1,
-                branch_name: row.2,
-                class_name: row.3,
-                category: row.4,
-                trainer_name: row.5,
-                start_at: row.6,
-                end_at: row.7,
-                capacity: row.8,
-                available_slots: row.9,
-            })
-            .collect(),
-    ))
+    let items: Vec<SessionView> = rows
+        .into_iter()
+        .map(|row| SessionView {
+            id: row.0,
+            branch_id: row.1,
+            branch_name: row.2,
+            class_name: row.3,
+            category: row.4,
+            trainer_name: row.5,
+            start_at: row.6,
+            end_at: row.7,
+            capacity: row.8,
+            available_slots: row.9,
+        })
+        .collect();
+
+    Ok(Json(pagination::paginate(items, limit, |s| StartAtCursor {
+        start_at: s.start_at,
+        id: s.id,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct BookingHistoryQuery {
+    status: Option<String>,
+    cursor: Option<String>,
+    limit: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -135,7 +162,11 @@ pub struct BookingView {
 pub async fn bookings(
     State(state): State<AppState>,
     student: AuthStudent,
-) -> Result<Json<Vec<BookingView>>, AppError> {
+    Query(query): Query<BookingHistoryQuery>,
+) -> Result<Json<Page<BookingView>>, AppError> {
+    let limit = pagination::clamp_limit(query.limit);
+    let cursor = pagination::decode_cursor::<StartAtCursor>(query.cursor.as_deref());
+
     let rows: Vec<(
         Uuid,
         Uuid,
@@ -152,27 +183,38 @@ pub async fn bookings(
                JOIN class_type ct ON ct.id = cs.class_type_id
                JOIN branch br ON br.id = cs.branch_id
                WHERE bk.student_id = $1
-               ORDER BY cs.start_at DESC LIMIT 200"#,
+                 AND ($2::text IS NULL OR bk.status = $2)
+                 AND ($3::timestamptz IS NULL OR (cs.start_at, bk.id) < ($3, $4))
+               ORDER BY cs.start_at DESC, bk.id DESC
+               LIMIT $5"#,
     )
     .bind(student.0)
+    .bind(query.status)
+    .bind(cursor.as_ref().map(|c| c.start_at))
+    .bind(cursor.as_ref().map(|c| c.id))
+    .bind(limit + 1)
     .fetch_all(&state.pool)
     .await?;
     let cancellation_deadline = Utc::now() + Duration::hours(6);
-    Ok(Json(
-        rows.into_iter()
-            .map(|row| BookingView {
-                id: row.0,
-                session_id: row.1,
-                class_name: row.2,
-                branch_name: row.3,
-                start_at: row.4,
-                end_at: row.5,
-                status: row.6.clone(),
-                booked_at: row.7,
-                cancellable: row.6 == "booked" && row.4 >= cancellation_deadline,
-            })
-            .collect(),
-    ))
+    let items: Vec<BookingView> = rows
+        .into_iter()
+        .map(|row| BookingView {
+            id: row.0,
+            session_id: row.1,
+            class_name: row.2,
+            branch_name: row.3,
+            start_at: row.4,
+            end_at: row.5,
+            status: row.6.clone(),
+            booked_at: row.7,
+            cancellable: row.6 == "booked" && row.4 >= cancellation_deadline,
+        })
+        .collect();
+
+    Ok(Json(pagination::paginate(items, limit, |b| StartAtCursor {
+        start_at: b.start_at,
+        id: b.id,
+    })))
 }
 
 #[derive(Serialize)]

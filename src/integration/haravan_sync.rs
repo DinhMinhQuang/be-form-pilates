@@ -60,6 +60,85 @@ fn sku_to_categories(sku: &str) -> &'static [&'static str] {
     }
 }
 
+// Định danh thật của 1 gói bên Haravan là haravan_variant_id, KHÔNG phải SKU — SKU có thể
+// bị admin đổi (đổi tên, tăng số buổi...) mà variant vẫn là chính nó. Nếu variant này đã có
+// mapping từ trước, update thẳng course_package đang gắn với mapping đó (giữ nguyên package_id,
+// không tạo bản ghi mới) để không mất liên kết credit_lot/package_class_type đã có và không
+// sinh package mồ côi mỗi lần SKU đổi. Chỉ tạo package mới khi lần đầu thấy variant này.
+async fn upsert_variant_package(
+    pool: &PgPool,
+    sku: &str,
+    name: &str,
+    sessions: i32,
+    validity_days: i32,
+    haravan_product_id: &str,
+    haravan_variant_id: &str,
+    branch_id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let existing_package_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT package_id FROM haravan_product_mapping WHERE haravan_variant_id = $1",
+    )
+    .bind(haravan_variant_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(package_id) = existing_package_id {
+        sqlx::query(
+            r#"UPDATE course_package
+               SET code = $1, name = $2, sessions = $3, validity_days = $4,
+                   haravan_sku = $1, status = 'active'
+               WHERE id = $5"#,
+        )
+        .bind(sku)
+        .bind(name)
+        .bind(sessions)
+        .bind(validity_days)
+        .bind(package_id)
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"UPDATE haravan_product_mapping
+               SET haravan_product_id = $1, branch_id = $2, active = true
+               WHERE haravan_variant_id = $3"#,
+        )
+        .bind(haravan_product_id)
+        .bind(branch_id)
+        .bind(haravan_variant_id)
+        .execute(pool)
+        .await?;
+
+        return Ok(Some(package_id));
+    }
+
+    // Variant chưa từng được map — upsert course_package theo SKU (tự gộp lại nếu đã có
+    // package mồ côi trùng SKU từ trước khi có hàm này), rồi tạo mapping mới cho variant.
+    sqlx::query_scalar::<_, Uuid>(
+        r#"WITH pkg AS (
+               INSERT INTO course_package (code, name, sessions, validity_days, haravan_sku)
+               VALUES ($1, $2, $3, $4, $1)
+               ON CONFLICT (haravan_sku) DO UPDATE
+                   SET name = EXCLUDED.name,
+                       sessions = EXCLUDED.sessions,
+                       validity_days = EXCLUDED.validity_days,
+                       status = 'active'
+               RETURNING id
+           )
+           INSERT INTO haravan_product_mapping (haravan_product_id, haravan_variant_id, package_id, branch_id)
+           SELECT $5, $6, id, $7 FROM pkg
+           RETURNING package_id"#,
+    )
+    .bind(sku)
+    .bind(name)
+    .bind(sessions)
+    .bind(validity_days)
+    .bind(haravan_product_id)
+    .bind(haravan_variant_id)
+    .bind(branch_id)
+    .fetch_optional(pool)
+    .await
+}
+
 pub async fn sync_products(pool: &PgPool) {
     let Ok(api_url) = std::env::var("HARAVAN_API_URL") else {
         tracing::warn!("HARAVAN_API_URL not set, skipping product sync");
@@ -89,7 +168,7 @@ async fn fetch_and_upsert(api_url: &str, api_token: &str, pool: &PgPool) -> anyh
         .json()
         .await?;
 
-    let mut upserted = 0;
+    let mut upsert = 0;
     for collection in &collections.custom_collections {
         let collection_id_str = collection.id.to_string();
 
@@ -144,41 +223,23 @@ async fn fetch_and_upsert(api_url: &str, api_token: &str, pool: &PgPool) -> anyh
 
                 let name = format!("{} - {}", product.title, variant.title);
 
-                // Upsert package + mapping
-                let pkg_result = sqlx::query_scalar::<_, Uuid>(
-                    r#"WITH pkg AS (
-                           INSERT INTO course_package (code, name, sessions, validity_days, haravan_sku)
-                           VALUES ($1, $2, $3, $4, $1)
-                           ON CONFLICT (haravan_sku) DO UPDATE
-                               SET name = EXCLUDED.name,
-                                   sessions = EXCLUDED.sessions,
-                                   validity_days = EXCLUDED.validity_days,
-                                   status = 'active'
-                           RETURNING id
-                       )
-                       INSERT INTO haravan_product_mapping (haravan_product_id, haravan_variant_id, package_id, branch_id)
-                       SELECT $5, $6, id, $7 FROM pkg
-                       ON CONFLICT (haravan_variant_id) DO UPDATE
-                           SET haravan_product_id = EXCLUDED.haravan_product_id,
-                               branch_id = EXCLUDED.branch_id,
-                               active = true
-                       RETURNING package_id"#,
+                let pkg_result = upsert_variant_package(
+                    pool,
+                    sku,
+                    &name,
+                    sessions,
+                    validity_days,
+                    &product.id.to_string(),
+                    &variant.id.to_string(),
+                    branch_id,
                 )
-                .bind(sku)
-                .bind(&name)
-                .bind(sessions)
-                .bind(validity_days)
-                .bind(product.id.to_string())
-                .bind(variant.id.to_string())
-                .bind(branch_id)
-                .fetch_optional(pool)
                 .await;
 
                 match pkg_result {
                     Ok(Some(package_id)) => {
                         // Upsert package_class_type dựa vào category của SKU
                         for cat in sku_to_categories(sku) {
-                            let _ = sqlx::query(
+                            if let Err(e) = sqlx::query(
                                 r#"INSERT INTO package_class_type (package_id, class_type_id)
                                    SELECT $1, id FROM class_type WHERE category = $2
                                    ON CONFLICT DO NOTHING"#,
@@ -186,9 +247,12 @@ async fn fetch_and_upsert(api_url: &str, api_token: &str, pool: &PgPool) -> anyh
                             .bind(package_id)
                             .bind(cat)
                             .execute(pool)
-                            .await;
+                            .await
+                            {
+                                tracing::error!(sku, cat, error = %e, "failed to upsert package_class_type");
+                            }
                         }
-                        upserted += 1;
+                        upsert += 1;
                     }
                     Ok(None) => {}
                     Err(e) => tracing::error!(sku, error = %e, "failed to upsert variant"),
@@ -218,5 +282,5 @@ async fn fetch_and_upsert(api_url: &str, api_token: &str, pool: &PgPool) -> anyh
         }
     }
 
-    Ok(upserted)
+    Ok(upsert)
 }

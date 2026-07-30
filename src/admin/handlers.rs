@@ -16,6 +16,7 @@ use crate::{
     booking::service,
     domain::BookingChannel,
     error::AppError,
+    pagination::{self, Page},
     state::AppState,
 };
 
@@ -102,6 +103,8 @@ pub struct SessionQuery {
     branch_id: Option<Uuid>,
     trainer_id: Option<Uuid>,
     status: Option<String>,
+    cursor: Option<String>,
+    limit: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -120,11 +123,17 @@ pub struct AdminSessionView {
     status: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct SessionCursor {
+    start_at: DateTime<Utc>,
+    id: Uuid,
+}
+
 pub async fn sessions(
     State(state): State<AppState>,
     _admin: AuthAdmin,
     Query(query): Query<SessionQuery>,
-) -> Result<Json<Vec<AdminSessionView>>, AppError> {
+) -> Result<Json<Page<AdminSessionView>>, AppError> {
     let from = query.from.unwrap_or_else(|| Utc::now() - Duration::days(7));
     let to = query.to.unwrap_or(from + Duration::days(62));
     if to <= from || to - from > Duration::days(190) {
@@ -137,6 +146,8 @@ pub async fn sessions(
     {
         return Err(AppError::InvalidInput("invalid_session_status"));
     }
+    let limit = pagination::clamp_limit(query.limit);
+    let cursor = pagination::decode_cursor::<SessionCursor>(query.cursor.as_deref());
 
     let rows: Vec<(
         Uuid,
@@ -169,35 +180,43 @@ pub async fn sessions(
              AND ($3::uuid IS NULL OR sess.branch_id = $3)
              AND ($4::uuid IS NULL OR sess.trainer_id = $4)
              AND ($5::text IS NULL OR sess.status = $5)
-           ORDER BY sess.start_at DESC
-           LIMIT 500"#,
+             AND ($6::timestamptz IS NULL OR (sess.start_at, sess.id) < ($6, $7))
+           ORDER BY sess.start_at DESC, sess.id DESC
+           LIMIT $8"#,
     )
     .bind(from)
     .bind(to)
     .bind(query.branch_id)
     .bind(query.trainer_id)
     .bind(query.status)
+    .bind(cursor.as_ref().map(|c| c.start_at))
+    .bind(cursor.as_ref().map(|c| c.id))
+    .bind(limit + 1)
     .fetch_all(&state.pool)
     .await?;
 
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| AdminSessionView {
-                id: r.0,
-                branch_id: r.1,
-                branch_name: r.2,
-                class_type_id: r.3,
-                class_name: r.4,
-                trainer_id: r.5,
-                trainer_name: r.6,
-                start_at: r.7,
-                end_at: r.8,
-                capacity: r.9,
-                booked_count: r.10,
-                status: r.11,
-            })
-            .collect(),
-    ))
+    let items: Vec<AdminSessionView> = rows
+        .into_iter()
+        .map(|r| AdminSessionView {
+            id: r.0,
+            branch_id: r.1,
+            branch_name: r.2,
+            class_type_id: r.3,
+            class_name: r.4,
+            trainer_id: r.5,
+            trainer_name: r.6,
+            start_at: r.7,
+            end_at: r.8,
+            capacity: r.9,
+            booked_count: r.10,
+            status: r.11,
+        })
+        .collect();
+
+    Ok(Json(pagination::paginate(items, limit, |s| SessionCursor {
+        start_at: s.start_at,
+        id: s.id,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -372,6 +391,9 @@ pub struct CreateTrainerInput {
 #[derive(Deserialize)]
 pub struct StaffQuery {
     status: Option<String>,
+    q: Option<String>,
+    cursor: Option<String>,
+    limit: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -388,7 +410,7 @@ pub async fn trainers(
     State(state): State<AppState>,
     _admin: AuthAdmin,
     Query(query): Query<StaffQuery>,
-) -> Result<Json<Vec<TrainerView>>, AppError> {
+) -> Result<Json<Page<TrainerView>>, AppError> {
     if query
         .status
         .as_deref()
@@ -396,6 +418,10 @@ pub async fn trainers(
     {
         return Err(AppError::InvalidInput("invalid_status"));
     }
+    let limit = pagination::clamp_limit(query.limit);
+    let cursor = pagination::decode_cursor::<NameCursor>(query.cursor.as_deref());
+    let like = query.q.as_ref().map(|q| format!("%{}%", q.trim()));
+
     let rows: Vec<(
         Uuid,
         String,
@@ -409,24 +435,34 @@ pub async fn trainers(
                LEFT JOIN staff_credential sc ON sc.user_id = u.id
                WHERE u.role = 'trainer'
                  AND ($1::text IS NULL OR u.status = $1)
-               ORDER BY u.full_name
-               LIMIT 500"#,
+                 AND ($2::text IS NULL OR u.full_name ILIKE $2 OR u.phone ILIKE $2)
+                 AND ($3::text IS NULL OR (u.full_name, u.id) > ($3, $4))
+               ORDER BY u.full_name, u.id
+               LIMIT $5"#,
     )
     .bind(query.status)
+    .bind(&like)
+    .bind(cursor.as_ref().map(|c| c.full_name.clone()))
+    .bind(cursor.as_ref().map(|c| c.id))
+    .bind(limit + 1)
     .fetch_all(&state.pool)
     .await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| TrainerView {
-                id: r.0,
-                full_name: r.1,
-                email: r.2,
-                phone: r.3,
-                status: r.4,
-                last_login_at: r.5,
-            })
-            .collect(),
-    ))
+    let items: Vec<TrainerView> = rows
+        .into_iter()
+        .map(|r| TrainerView {
+            id: r.0,
+            full_name: r.1,
+            email: r.2,
+            phone: r.3,
+            status: r.4,
+            last_login_at: r.5,
+        })
+        .collect();
+
+    Ok(Json(pagination::paginate(items, limit, |t| NameCursor {
+        full_name: t.full_name.clone(),
+        id: t.id,
+    })))
 }
 
 pub async fn create_trainer(
@@ -515,6 +551,14 @@ pub async fn delete_trainer(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+pub struct StudentQuery {
+    q: Option<String>,
+    status: Option<String>,
+    cursor: Option<String>,
+    limit: Option<i64>,
+}
+
 #[derive(Serialize)]
 pub struct StudentView {
     id: Uuid,
@@ -525,27 +569,62 @@ pub struct StudentView {
     credits: i64,
 }
 
+#[derive(Serialize, Deserialize)]
+struct NameCursor {
+    full_name: String,
+    id: Uuid,
+}
+
 pub async fn students(
     State(state): State<AppState>,
     _admin: AuthAdmin,
-) -> Result<Json<Vec<StudentView>>, AppError> {
+    Query(query): Query<StudentQuery>,
+) -> Result<Json<Page<StudentView>>, AppError> {
+    if query
+        .status
+        .as_deref()
+        .is_some_and(|v| v != "active" && v != "disabled")
+    {
+        return Err(AppError::InvalidInput("invalid_status"));
+    }
+    let limit = pagination::clamp_limit(query.limit);
+    let cursor = pagination::decode_cursor::<NameCursor>(query.cursor.as_deref());
+    let like = query.q.as_ref().map(|q| format!("%{}%", q.trim()));
+
     let rows: Vec<(Uuid, String, Option<String>, Option<String>, String, i64)> = sqlx::query_as(
         r#"SELECT u.id, u.full_name, u.email, u.phone, u.status, COALESCE(SUM(cl.sessions_remaining), 0)::bigint
            FROM app_user u LEFT JOIN credit_lot cl ON cl.student_id = u.id AND cl.status = 'active'
-           WHERE u.role = 'student' GROUP BY u.id ORDER BY u.full_name LIMIT 500"#,
-    ).fetch_all(&state.pool).await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| StudentView {
-                id: r.0,
-                full_name: r.1,
-                email: r.2,
-                phone: r.3,
-                status: r.4,
-                credits: r.5,
-            })
-            .collect(),
-    ))
+           WHERE u.role = 'student'
+             AND ($1::text IS NULL OR u.status = $1)
+             AND ($2::text IS NULL OR u.full_name ILIKE $2 OR u.phone ILIKE $2)
+             AND ($3::text IS NULL OR (u.full_name, u.id) > ($3, $4))
+           GROUP BY u.id
+           ORDER BY u.full_name, u.id
+           LIMIT $5"#,
+    )
+    .bind(query.status)
+    .bind(&like)
+    .bind(cursor.as_ref().map(|c| c.full_name.clone()))
+    .bind(cursor.as_ref().map(|c| c.id))
+    .bind(limit + 1)
+    .fetch_all(&state.pool)
+    .await?;
+    let items: Vec<StudentView> = rows
+        .into_iter()
+        .map(|r| StudentView {
+            id: r.0,
+            full_name: r.1,
+            email: r.2,
+            phone: r.3,
+            status: r.4,
+            credits: r.5,
+        })
+        .collect();
+
+    Ok(Json(pagination::paginate(items, limit, |s| NameCursor {
+        full_name: s.full_name.clone(),
+        id: s.id,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -769,6 +848,9 @@ pub struct BookingQuery {
     student_id: Option<Uuid>,
     session_id: Option<Uuid>,
     status: Option<String>,
+    q: Option<String>,
+    cursor: Option<String>,
+    limit: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -787,11 +869,17 @@ pub struct AdminBookingView {
     booked_at: DateTime<Utc>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct BookedAtCursor {
+    booked_at: DateTime<Utc>,
+    id: Uuid,
+}
+
 pub async fn bookings(
     State(state): State<AppState>,
     _admin: AuthAdmin,
     Query(query): Query<BookingQuery>,
-) -> Result<Json<Vec<AdminBookingView>>, AppError> {
+) -> Result<Json<Page<AdminBookingView>>, AppError> {
     let from = query
         .from
         .unwrap_or_else(|| Utc::now() - Duration::days(31));
@@ -799,6 +887,10 @@ pub async fn bookings(
     if to <= from || to - from > Duration::days(190) {
         return Err(AppError::InvalidInput("invalid_booking_range"));
     }
+    let limit = pagination::clamp_limit(query.limit);
+    let cursor = pagination::decode_cursor::<BookedAtCursor>(query.cursor.as_deref());
+    let like = query.q.as_ref().map(|q| format!("%{}%", q.trim()));
+
     let rows: Vec<(
         Uuid,
         Uuid,
@@ -824,34 +916,44 @@ pub async fn bookings(
              AND ($3::uuid IS NULL OR bk.student_id = $3)
              AND ($4::uuid IS NULL OR bk.session_id = $4)
              AND ($5::text IS NULL OR bk.status = $5)
-           ORDER BY cs.start_at DESC, u.full_name
-           LIMIT 1000"#,
+             AND ($6::text IS NULL OR u.full_name ILIKE $6 OR u.phone ILIKE $6)
+             AND ($7::timestamptz IS NULL OR (bk.booked_at, bk.id) < ($7, $8))
+           ORDER BY bk.booked_at DESC, bk.id DESC
+           LIMIT $9"#,
     )
     .bind(from)
     .bind(to)
     .bind(query.student_id)
     .bind(query.session_id)
     .bind(query.status)
+    .bind(&like)
+    .bind(cursor.as_ref().map(|c| c.booked_at))
+    .bind(cursor.as_ref().map(|c| c.id))
+    .bind(limit + 1)
     .fetch_all(&state.pool)
     .await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| AdminBookingView {
-                id: r.0,
-                session_id: r.1,
-                student_id: r.2,
-                student_name: r.3,
-                student_phone: r.4,
-                branch_name: r.5,
-                class_name: r.6,
-                start_at: r.7,
-                end_at: r.8,
-                status: r.9,
-                channel: r.10,
-                booked_at: r.11,
-            })
-            .collect(),
-    ))
+    let items: Vec<AdminBookingView> = rows
+        .into_iter()
+        .map(|r| AdminBookingView {
+            id: r.0,
+            session_id: r.1,
+            student_id: r.2,
+            student_name: r.3,
+            student_phone: r.4,
+            branch_name: r.5,
+            class_name: r.6,
+            start_at: r.7,
+            end_at: r.8,
+            status: r.9,
+            channel: r.10,
+            booked_at: r.11,
+        })
+        .collect();
+
+    Ok(Json(pagination::paginate(items, limit, |b| BookedAtCursor {
+        booked_at: b.booked_at,
+        id: b.id,
+    })))
 }
 
 pub async fn book_for_student(
@@ -1041,48 +1143,83 @@ pub struct ProductMappingView {
     haravan_variant_id: String,
     package_id: Uuid,
     package_name: String,
+    haravan_sku: Option<String>,
     branch_id: Option<Uuid>,
     branch_name: Option<String>,
     active: bool,
 }
 
+#[derive(Deserialize)]
+pub struct ProductMappingQuery {
+    branch_id: Option<Uuid>,
+    active: Option<bool>,
+    q: Option<String>,
+    cursor: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IdCursor {
+    id: Uuid,
+}
+
 pub async fn product_mappings(
     State(state): State<AppState>,
     _admin: AuthAdmin,
-) -> Result<Json<Vec<ProductMappingView>>, AppError> {
+    Query(query): Query<ProductMappingQuery>,
+) -> Result<Json<Page<ProductMappingView>>, AppError> {
+    let limit = pagination::clamp_limit(query.limit);
+    let cursor = pagination::decode_cursor::<IdCursor>(query.cursor.as_deref());
+    let like = query.q.as_ref().map(|q| format!("%{}%", q.trim()));
+
     let rows: Vec<(
         Uuid,
         Option<String>,
         String,
         Uuid,
         String,
+        Option<String>,
         Option<Uuid>,
         Option<String>,
         bool,
     )> = sqlx::query_as(
         r#"SELECT hpm.id, hpm.haravan_product_id, hpm.haravan_variant_id,
-                      cp.id, cp.name, br.id, br.name, hpm.active
+                      cp.id, cp.name, cp.haravan_sku, br.id, br.name, hpm.active
                FROM haravan_product_mapping hpm
                JOIN course_package cp ON cp.id = hpm.package_id
                LEFT JOIN branch br ON br.id = hpm.branch_id
-               ORDER BY hpm.active DESC, cp.sessions, hpm.haravan_variant_id"#,
+               WHERE ($1::uuid IS NULL OR hpm.branch_id = $1)
+                 AND ($2::bool IS NULL OR hpm.active = $2)
+                 AND ($3::text IS NULL OR cp.name ILIKE $3 OR cp.haravan_sku ILIKE $3)
+                 AND ($4::uuid IS NULL OR hpm.id > $4)
+               ORDER BY hpm.id
+               LIMIT $5"#,
     )
+    .bind(query.branch_id)
+    .bind(query.active)
+    .bind(&like)
+    .bind(cursor.as_ref().map(|c| c.id))
+    .bind(limit + 1)
     .fetch_all(&state.pool)
     .await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| ProductMappingView {
-                id: r.0,
-                haravan_product_id: r.1,
-                haravan_variant_id: r.2,
-                package_id: r.3,
-                package_name: r.4,
-                branch_id: r.5,
-                branch_name: r.6,
-                active: r.7,
-            })
-            .collect(),
-    ))
+    let items: Vec<ProductMappingView> = rows
+        .into_iter()
+        .map(|r| ProductMappingView {
+            id: r.0,
+            haravan_product_id: r.1,
+            haravan_variant_id: r.2,
+            package_id: r.3,
+            package_name: r.4,
+            haravan_sku: r.5,
+            branch_id: r.6,
+            branch_name: r.7,
+            active: r.8,
+        })
+        .collect();
+
+    Ok(Json(pagination::paginate(items, limit, |m| IdCursor {
+        id: m.id,
+    })))
 }
 
 pub async fn create_product_mapping(
@@ -1175,12 +1312,14 @@ fn hash_password(password: &str) -> Result<String, AppError> {
 }
 
 fn map_unique(error: sqlx::Error) -> AppError {
-    if error
-        .as_database_error()
-        .is_some_and(|e| e.is_unique_violation())
-    {
-        AppError::Conflict
-    } else {
-        AppError::Db(error)
+    if let Some(db) = error.as_database_error() {
+        if db.is_unique_violation() {
+            return match db.constraint() {
+                Some("uniq_user_email") => AppError::InvalidInput("email_already_exists"),
+                Some("uniq_user_phone_role") => AppError::InvalidInput("phone_already_exists"),
+                _ => AppError::Conflict,
+            };
+        }
     }
+    AppError::Db(error)
 }

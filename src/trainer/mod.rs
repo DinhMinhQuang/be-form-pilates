@@ -3,7 +3,7 @@ mod handlers;
 use crate::state::AppState;
 use axum::{
     Router,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 
 pub fn routes() -> Router<AppState> {
@@ -19,4 +19,5 @@ pub fn routes() -> Router<AppState> {
             "/trainer/students/:student_id/sessions/:session_id/book",
             post(handlers::book_for_student),
         )
+        .route("/trainer/me/password", put(handlers::change_password))
 }

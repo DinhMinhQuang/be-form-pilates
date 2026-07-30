@@ -74,6 +74,8 @@ fn vi_message(code: &str) -> &'static str {
         "invalid_haravan_order" => "Dữ liệu đơn hàng Haravan không hợp lệ.",
         "class_not_available_at_branch" => "Loại lớp học này không có tại chi nhánh.",
         "email_or_phone_required" => "Vui lòng cung cấp email hoặc số điện thoại.",
+        "email_already_exists" => "Email này đã được sử dụng.",
+        "phone_already_exists" => "Số điện thoại này đã được sử dụng.",
         "adjustment_and_reason_required" => "Cần có lý do và ít nhất một thay đổi (buổi hoặc hạn).",
         "insufficient_credit" => "Số buổi còn lại không đủ để điều chỉnh.",
         "quantity_too_large" => "Số lượng vượt quá giới hạn cho phép.",

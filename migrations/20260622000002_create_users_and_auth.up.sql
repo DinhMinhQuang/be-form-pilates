@@ -10,7 +10,7 @@ CREATE TABLE app_user (
     CHECK (email IS NOT NULL OR phone IS NOT NULL)
 );
 CREATE UNIQUE INDEX uniq_user_email ON app_user (lower(email)) WHERE email IS NOT NULL;
-CREATE UNIQUE INDEX uniq_user_phone ON app_user (phone) WHERE phone IS NOT NULL;
+CREATE UNIQUE INDEX uniq_user_phone_role ON app_user (phone, role) WHERE phone IS NOT NULL;
 
 CREATE TABLE student_profile (
     user_id              uuid PRIMARY KEY REFERENCES app_user(id) ON DELETE CASCADE,
