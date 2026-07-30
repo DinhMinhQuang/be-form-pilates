@@ -22,7 +22,7 @@ CREATE TABLE booking (
     credit_lot_id         uuid NOT NULL REFERENCES credit_lot(id),
     status                text NOT NULL CHECK (status IN ('booked', 'cancelled_refunded', 'attended', 'no_show')),
     booked_by             uuid NOT NULL REFERENCES app_user(id),
-    channel               text NOT NULL CHECK (channel IN ('student', 'admin')),
+    channel               text NOT NULL CHECK (channel IN ('student', 'trainer', 'admin')),
     booked_at             timestamptz NOT NULL DEFAULT now(),
     cancelled_at          timestamptz,
     cancellation_reason   text,

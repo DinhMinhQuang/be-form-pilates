@@ -12,6 +12,7 @@ fn hash(password: &str) -> String {
 }
 
 fn main() {
-    println!("admin123: {}", hash("admin123"));
-    println!("trainer123: {}", hash("trainer123"));
+    for password in std::env::args().skip(1) {
+        println!("{}: {}", password, hash(&password));
+    }
 }

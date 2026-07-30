@@ -7,6 +7,7 @@ mod email;
 mod error;
 mod integration;
 mod middleware;
+mod pagination;
 mod request_id;
 mod state;
 mod student;
