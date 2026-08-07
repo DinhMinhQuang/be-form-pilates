@@ -80,8 +80,13 @@ fn vi_message(code: &str) -> &'static str {
         "insufficient_credit" => "Số buổi còn lại không đủ để điều chỉnh.",
         "quantity_too_large" => "Số lượng vượt quá giới hạn cho phép.",
         "query_too_short" => "Từ khóa tìm kiếm cần ít nhất 2 ký tự.",
+        "reason_required" => "Vui lòng nhập lý do.",
+        "same_session" => "Buổi học mới phải khác buổi học hiện tại.",
         "order_not_paid" => "Đơn hàng chưa được thanh toán.",
         "trainer_schedule_conflict" => "Huấn luyện viên đã có lịch dạy trong khoảng thời gian này.",
+        "trainer_cannot_create_group_session" => {
+            "Huấn luyện viên chỉ được tạo lớp Private hoặc Duo."
+        }
         // Integration / internal
         "integration_error" => "Lỗi tích hợp, vui lòng thử lại sau.",
         "internal" => "Lỗi hệ thống, vui lòng thử lại sau.",

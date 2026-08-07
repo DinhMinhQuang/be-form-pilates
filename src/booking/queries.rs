@@ -250,3 +250,47 @@ pub async fn set_booking_status(
         .await?;
     Ok(())
 }
+
+pub async fn set_booking_cancelled_with_reason(
+    conn: &mut PgConnection,
+    booking_id: Uuid,
+    reason: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE booking SET status = 'cancelled_refunded', cancelled_at = now(), cancellation_reason = $2 WHERE id = $1",
+    )
+    .bind(booking_id)
+    .bind(reason)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+pub async fn write_ledger_meta(
+    conn: &mut PgConnection,
+    lot_id: Uuid,
+    booking_id: Uuid,
+    delta: i32,
+    reason: &str,
+    actor_id: Uuid,
+    student_id: Uuid,
+    balance_after: i32,
+    metadata: serde_json::Value,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"INSERT INTO credit_ledger
+             (id, student_id, lot_id, booking_id, delta, balance_after, reason, actor_id, metadata, created_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, now())"#,
+    )
+    .bind(student_id)
+    .bind(lot_id)
+    .bind(booking_id)
+    .bind(delta)
+    .bind(balance_after)
+    .bind(reason)
+    .bind(actor_id)
+    .bind(metadata)
+    .execute(conn)
+    .await?;
+    Ok(())
+}

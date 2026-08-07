@@ -89,6 +89,135 @@ pub async fn book_class(
     Ok(booking_id)
 }
 
+// Admin override: hủy bất kỳ booking nào (kể cả sát giờ/sau buổi học), có lý do bắt buộc.
+// refund=true → hoàn +1 credit về lot cũ. Với attended/no_show không điều chỉnh slot session.
+pub async fn admin_override_cancel(
+    pool: &PgPool,
+    booking_id: Uuid,
+    admin_id: Uuid,
+    refund: bool,
+    reason: String,
+) -> Result<CancelOutcome, AppError> {
+    let mut tx = pool.begin().await?;
+
+    let b = queries::lock_booking(&mut tx, booking_id)
+        .await?
+        .ok_or(AppError::BookingNotFound)?;
+    if !matches!(b.status.as_str(), "booked" | "attended" | "no_show") {
+        return Err(AppError::NotCancellable);
+    }
+
+    if refund {
+        let (_, balance) = queries::adjust_lot(&mut tx, b.credit_lot_id, 1).await?;
+        queries::write_ledger_meta(
+            &mut tx,
+            b.credit_lot_id,
+            booking_id,
+            1,
+            "admin_override_refund",
+            admin_id,
+            b.student_id,
+            balance,
+            serde_json::json!({"admin_reason": reason}),
+        )
+        .await?;
+    }
+    if b.status == "booked" {
+        queries::adjust_session_count(&mut tx, b.session_id, -1).await?;
+    }
+    queries::set_booking_cancelled_with_reason(&mut tx, booking_id, &reason).await?;
+    tx.commit().await?;
+    Ok(CancelOutcome { refunded: refund })
+}
+
+// Admin override: đổi lịch bất kể thời gian, reuse credit lot cũ để tránh trừ nhầm.
+// Hoàn credit về lot cũ → trừ lại từ cùng lot cho session mới.
+pub async fn admin_override_reschedule(
+    pool: &PgPool,
+    booking_id: Uuid,
+    new_session_id: Uuid,
+    admin_id: Uuid,
+    reason: String,
+) -> Result<Uuid, AppError> {
+    let mut tx = pool.begin().await?;
+
+    let b = queries::lock_booking(&mut tx, booking_id)
+        .await?
+        .ok_or(AppError::BookingNotFound)?;
+    if b.status != "booked" {
+        return Err(AppError::NotCancellable);
+    }
+    if b.session_id == new_session_id {
+        return Err(AppError::InvalidInput("same_session"));
+    }
+
+    let new_session = queries::lock_session(&mut tx, new_session_id)
+        .await?
+        .ok_or(AppError::SessionNotFound)?;
+    if new_session.status != "scheduled" {
+        return Err(AppError::SessionNotBookable);
+    }
+    if new_session.booked_count >= new_session.capacity {
+        return Err(AppError::SessionFull);
+    }
+    if queries::has_time_conflict(&mut tx, b.student_id, new_session_id).await? {
+        let name = queries::get_student_name(&mut tx, b.student_id).await?;
+        return Err(AppError::ScheduleConflictNamed(name));
+    }
+
+    // Hoàn về lot cũ rồi trừ lại cho session mới — cùng lot, net = 0.
+    let (_, bal_after_refund) = queries::adjust_lot(&mut tx, b.credit_lot_id, 1).await?;
+    queries::write_ledger_meta(
+        &mut tx,
+        b.credit_lot_id,
+        booking_id,
+        1,
+        "admin_reschedule_refund",
+        admin_id,
+        b.student_id,
+        bal_after_refund,
+        serde_json::json!({"admin_reason": reason, "new_session_id": new_session_id}),
+    )
+    .await?;
+
+    queries::set_booking_cancelled_with_reason(&mut tx, booking_id, &reason).await?;
+    queries::adjust_session_count(&mut tx, b.session_id, -1).await?;
+
+    let (_, bal_after_debit) = queries::adjust_lot(&mut tx, b.credit_lot_id, -1).await?;
+    let new_booking_id = queries::insert_booking(
+        &mut tx,
+        new_session_id,
+        b.student_id,
+        b.credit_lot_id,
+        admin_id,
+        BookingChannel::Admin,
+    )
+    .await
+    .map_err(|e| {
+        if e.as_database_error().map(|d| d.is_unique_violation()) == Some(true) {
+            AppError::AlreadyBooked
+        } else {
+            e.into()
+        }
+    })?;
+    queries::adjust_session_count(&mut tx, new_session_id, 1).await?;
+    queries::write_ledger_meta(
+        &mut tx,
+        b.credit_lot_id,
+        new_booking_id,
+        -1,
+        "admin_reschedule_book",
+        admin_id,
+        b.student_id,
+        bal_after_debit,
+        serde_json::json!({"admin_reason": reason, "old_booking_id": booking_id}),
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(new_booking_id)
+}
+
 // Hủy: >= 6h trước giờ học thì hoàn +1 VỀ ĐÚNG lot cũ; trong 6h thì khóa, không hoàn.
 pub async fn cancel_booking(
     pool: &PgPool,

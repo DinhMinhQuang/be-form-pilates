@@ -8,7 +8,10 @@ use axum::{
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/trainer/sessions", get(handlers::sessions))
+        .route(
+            "/trainer/sessions",
+            get(handlers::sessions).post(handlers::create_session),
+        )
         .route("/trainer/sessions/:id/students", get(handlers::students))
         .route("/trainer/students", get(handlers::search_students))
         .route(

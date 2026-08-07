@@ -44,12 +44,20 @@ pub fn routes() -> Router<AppState> {
             post(handlers::cancel_for_student),
         )
         .route(
+            "/admin/bookings/:id/reschedule",
+            post(handlers::reschedule_booking),
+        )
+        .route(
             "/admin/students/:student_id/credits",
             post(handlers::create_credit_lot),
         )
         .route(
             "/admin/students/:student_id/credits/:lot_id",
             patch(handlers::adjust_credit),
+        )
+        .route(
+            "/admin/students/:student_id/credits/:lot_id/history",
+            get(handlers::credit_history),
         )
         .route(
             "/admin/haravan/product-mappings",

@@ -25,6 +25,7 @@ use crate::{
 pub struct RangeQuery {
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
+    branch_id: Option<Uuid>,
     cursor: Option<String>,
     limit: Option<i64>,
 }
@@ -34,11 +35,13 @@ pub struct TrainerSession {
     id: Uuid,
     class_name: String,
     branch_name: String,
+    trainer_name: Option<String>,
     start_at: DateTime<Utc>,
     end_at: DateTime<Utc>,
     booked_count: i32,
     capacity: i32,
     status: String,
+    is_mine: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,36 +63,54 @@ pub async fn sessions(
     let limit = pagination::clamp_limit(query.limit);
     let cursor = pagination::decode_cursor::<StartAtCursor>(query.cursor.as_deref());
 
-    let rows: Vec<(Uuid, String, String, DateTime<Utc>, DateTime<Utc>, i32, i32, String)> = sqlx::query_as(
-        r#"SELECT cs.id, ct.name, br.name, cs.start_at, cs.end_at, cs.booked_count, cs.capacity, cs.status
-           FROM class_session cs JOIN class_type ct ON ct.id = cs.class_type_id
-           JOIN branch br ON br.id = cs.branch_id
-           JOIN app_user actor ON actor.id = $1
-           WHERE (cs.trainer_id = $1 OR actor.role = 'admin')
-             AND cs.start_at >= $2 AND cs.start_at < $3
-             AND ($4::timestamptz IS NULL OR (cs.start_at, cs.id) > ($4, $5))
-           ORDER BY cs.start_at, cs.id
-           LIMIT $6"#,
+    let rows: Vec<(
+        Uuid,
+        String,
+        String,
+        Option<String>,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        i32,
+        i32,
+        String,
+        Option<Uuid>,
+    )> = sqlx::query_as(
+        r#"SELECT cs.id, ct.name, br.name, t.full_name,
+                      cs.start_at, cs.end_at, cs.booked_count, cs.capacity, cs.status, cs.trainer_id
+               FROM class_session cs
+               JOIN class_type ct ON ct.id = cs.class_type_id
+               JOIN branch br ON br.id = cs.branch_id
+               LEFT JOIN app_user t ON t.id = cs.trainer_id
+               WHERE cs.start_at >= $1 AND cs.start_at < $2
+                 AND ($3::uuid IS NULL OR cs.branch_id = $3 OR cs.trainer_id = $4)
+                 AND ($3::uuid IS NOT NULL OR cs.trainer_id = $4)
+                 AND ($5::timestamptz IS NULL OR (cs.start_at, cs.id) > ($5, $6))
+               ORDER BY cs.start_at, cs.id
+               LIMIT $7"#,
     )
-    .bind(trainer.0)
     .bind(from)
     .bind(to)
+    .bind(query.branch_id)
+    .bind(trainer.0)
     .bind(cursor.as_ref().map(|c| c.start_at))
     .bind(cursor.as_ref().map(|c| c.id))
     .bind(limit + 1)
     .fetch_all(&state.pool)
     .await?;
+
     let items: Vec<TrainerSession> = rows
         .into_iter()
         .map(|r| TrainerSession {
             id: r.0,
             class_name: r.1,
             branch_name: r.2,
-            start_at: r.3,
-            end_at: r.4,
-            booked_count: r.5,
-            capacity: r.6,
-            status: r.7,
+            trainer_name: r.3,
+            start_at: r.4,
+            end_at: r.5,
+            booked_count: r.6,
+            capacity: r.7,
+            status: r.8,
+            is_mine: r.9 == Some(trainer.0),
         })
         .collect();
 
@@ -149,7 +170,8 @@ pub async fn attendance(
     Path(booking_id): Path<Uuid>,
     Json(input): Json<AttendanceInput>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    if input.status != "attended" && input.status != "no_show" {
+    let valid = matches!(input.status.as_str(), "attended" | "no_show" | "booked");
+    if !valid {
         return Err(AppError::InvalidInput("invalid_attendance_status"));
     }
     let session: Option<(Uuid,)> = sqlx::query_as("SELECT session_id FROM booking WHERE id = $1")
@@ -162,9 +184,26 @@ pub async fn attendance(
         session.ok_or(AppError::BookingNotFound)?.0,
     )
     .await?;
-    let result = sqlx::query(
-        "UPDATE booking SET status = $2, attended_at = now(), attendance_marked_by = $3 WHERE id = $1 AND status = 'booked'",
-    ).bind(booking_id).bind(&input.status).bind(trainer.0).execute(&state.pool).await?;
+    let result = if input.status == "booked" {
+        // Revert điểm danh: xóa attended_at, không động credit
+        sqlx::query(
+            "UPDATE booking SET status = 'booked', attended_at = NULL, attendance_marked_by = NULL \
+             WHERE id = $1 AND status IN ('attended', 'no_show')",
+        )
+        .bind(booking_id)
+        .execute(&state.pool)
+        .await?
+    } else {
+        sqlx::query(
+            "UPDATE booking SET status = $2, attended_at = now(), attendance_marked_by = $3 \
+             WHERE id = $1 AND status = 'booked'",
+        )
+        .bind(booking_id)
+        .bind(&input.status)
+        .bind(trainer.0)
+        .execute(&state.pool)
+        .await?
+    };
     if result.rows_affected() == 0 {
         return Err(AppError::Conflict);
     }
@@ -231,6 +270,82 @@ pub async fn search_students(
         full_name: s.full_name.clone(),
         id: s.id,
     })))
+}
+
+#[derive(Deserialize)]
+pub struct CreateSessionInput {
+    branch_id: Uuid,
+    class_type_id: Uuid,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+    capacity: Option<i32>,
+}
+
+pub async fn create_session(
+    State(state): State<AppState>,
+    trainer: AuthTrainer,
+    Json(input): Json<CreateSessionInput>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let max_duration = Duration::hours(3);
+    if input.end_at <= input.start_at
+        || input.start_at <= Utc::now()
+        || input.end_at - input.start_at > max_duration
+    {
+        return Err(AppError::InvalidInput("invalid_session_time"));
+    }
+
+    // Chi cho phep private / duo, khong duoc tao lop nhom
+    let config: Option<(i32, String)> = sqlx::query_as(
+        r#"SELECT ct.default_capacity, ct.category
+           FROM branch_class_type bct JOIN class_type ct ON ct.id = bct.class_type_id
+           WHERE bct.branch_id = $1 AND bct.class_type_id = $2 AND bct.enabled"#,
+    )
+    .bind(input.branch_id)
+    .bind(input.class_type_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let (default_capacity, category) =
+        config.ok_or(AppError::InvalidInput("class_not_available_at_branch"))?;
+    if category.starts_with("group") {
+        return Err(AppError::InvalidInput(
+            "trainer_cannot_create_group_session",
+        ));
+    }
+
+    let capacity = input.capacity.unwrap_or(default_capacity);
+    if !(1..=2).contains(&capacity) {
+        return Err(AppError::InvalidInput("invalid_capacity"));
+    }
+
+    let overlap: (bool,) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM class_session WHERE trainer_id = $1 AND status = 'scheduled' AND start_at < $3 AND end_at > $2)",
+    )
+    .bind(trainer.0)
+    .bind(input.start_at)
+    .bind(input.end_at)
+    .fetch_one(&state.pool)
+    .await?;
+    if overlap.0 {
+        return Err(AppError::InvalidInput("trainer_schedule_conflict"));
+    }
+
+    let (id,): (Uuid,) = sqlx::query_as(
+        r#"INSERT INTO class_session (branch_id, class_type_id, trainer_id, start_at, end_at, capacity, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $3) RETURNING id"#,
+    )
+    .bind(input.branch_id)
+    .bind(input.class_type_id)
+    .bind(trainer.0)
+    .bind(input.start_at)
+    .bind(input.end_at)
+    .bind(capacity)
+    .fetch_one(&state.pool)
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"session_id": id})),
+    ))
 }
 
 pub async fn book_for_student(
