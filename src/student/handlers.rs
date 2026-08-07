@@ -1,6 +1,7 @@
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
+    http::StatusCode,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,8 @@ use uuid::Uuid;
 
 use crate::{
     auth::{AuthStudent, AuthUser},
+    booking::service as booking_service,
+    domain::BookingChannel,
     error::AppError,
     pagination::{self, Page},
     state::AppState,
@@ -230,17 +233,31 @@ pub struct CreditView {
     activated_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     status: String,
+    branch_id: Option<Uuid>,
+    branch_name: Option<String>,
 }
 
 pub async fn credits(
     State(state): State<AppState>,
     student: AuthStudent,
 ) -> Result<Json<Vec<CreditView>>, AppError> {
-    let rows: Vec<(Uuid, String, i32, i32, DateTime<Utc>, DateTime<Utc>, String)> = sqlx::query_as(
+    let rows: Vec<(
+        Uuid,
+        String,
+        i32,
+        i32,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        String,
+        Option<Uuid>,
+        Option<String>,
+    )> = sqlx::query_as(
         r#"SELECT cl.id, cp.name, cl.sessions_total, cl.sessions_remaining,
-                  cl.activated_at, cl.expires_at, cl.status
-           FROM credit_lot cl JOIN course_package cp ON cp.id = cl.package_id
-           WHERE cl.student_id = $1 ORDER BY cl.expires_at"#,
+                      cl.activated_at, cl.expires_at, cl.status, b.id, b.name
+               FROM credit_lot cl
+               JOIN course_package cp ON cp.id = cl.package_id
+               LEFT JOIN branch b ON b.id = cl.branch_id
+               WHERE cl.student_id = $1 ORDER BY cl.expires_at"#,
     )
     .bind(student.0)
     .fetch_all(&state.pool)
@@ -255,7 +272,37 @@ pub async fn credits(
                 activated_at: row.4,
                 expires_at: row.5,
                 status: row.6,
+                branch_id: row.7,
+                branch_name: row.8,
             })
             .collect(),
     ))
+}
+
+pub async fn book_session(
+    State(state): State<AppState>,
+    student: AuthStudent,
+    Path(session_id): Path<Uuid>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let booking_id = booking_service::book_class(
+        &state.pool,
+        student.0,
+        session_id,
+        student.0,
+        BookingChannel::Student,
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"booking_id": booking_id})),
+    ))
+}
+
+pub async fn cancel_booking(
+    State(state): State<AppState>,
+    student: AuthStudent,
+    Path(booking_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    booking_service::cancel_booking(&state.pool, booking_id, student.0, false).await?;
+    Ok(Json(serde_json::json!({"refunded": true})))
 }

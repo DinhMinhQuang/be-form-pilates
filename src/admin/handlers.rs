@@ -328,11 +328,20 @@ pub async fn update_session(
     Ok(Json(serde_json::json!({"updated": true})))
 }
 
+#[derive(Deserialize, Default)]
+pub struct CancelSessionInput {
+    reason: Option<String>,
+}
+
 pub async fn cancel_session(
     State(state): State<AppState>,
     admin: AuthAdmin,
     Path(id): Path<Uuid>,
+    input: Option<Json<CancelSessionInput>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let reason = input
+        .and_then(|b| b.reason.clone())
+        .unwrap_or_else(|| "session_cancelled".to_string());
     let mut tx = state.pool.begin().await?;
     let result = sqlx::query(
         "UPDATE class_session SET status = 'cancelled', booked_count = 0 WHERE id = $1 AND status = 'scheduled'",
@@ -371,9 +380,10 @@ pub async fn cancel_session(
         .await?;
     }
     sqlx::query(
-        "UPDATE booking SET status = 'cancelled_refunded', cancelled_at = now(), cancellation_reason = 'session_cancelled' WHERE session_id = $1 AND status = 'booked'",
+        "UPDATE booking SET status = 'cancelled_refunded', cancelled_at = now(), cancellation_reason = $2 WHERE session_id = $1 AND status = 'booked'",
     )
     .bind(id)
+    .bind(&reason)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -650,9 +660,6 @@ pub async fn create_student(
         .phone
         .map(|v| normalize_phone(&v))
         .filter(|v| !v.is_empty());
-    if email.is_none() && phone.is_none() {
-        return Err(AppError::InvalidInput("email_or_phone_required"));
-    }
     let mut tx = state.pool.begin().await?;
     let (id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO app_user (role, email, phone, full_name) VALUES ('student', $1, $2, $3) RETURNING id",
@@ -869,6 +876,7 @@ pub struct AdminBookingView {
     status: String,
     channel: String,
     booked_at: DateTime<Utc>,
+    cancellation_reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -906,9 +914,10 @@ pub async fn bookings(
         String,
         String,
         DateTime<Utc>,
+        Option<String>,
     )> = sqlx::query_as(
         r#"SELECT bk.id, cs.id, u.id, u.full_name, u.phone, br.name, ct.name,
-                  cs.start_at, cs.end_at, bk.status, bk.channel, bk.booked_at
+                  cs.start_at, cs.end_at, bk.status, bk.channel, bk.booked_at, bk.cancellation_reason
            FROM booking bk
            JOIN app_user u ON u.id = bk.student_id
            JOIN class_session cs ON cs.id = bk.session_id
@@ -949,6 +958,7 @@ pub async fn bookings(
             status: r.9,
             channel: r.10,
             booked_at: r.11,
+            cancellation_reason: r.12,
         })
         .collect();
 
@@ -979,13 +989,56 @@ pub async fn book_for_student(
     ))
 }
 
+#[derive(Deserialize)]
+pub struct AdminCancelInput {
+    #[serde(default = "default_true")]
+    refund: bool,
+    reason: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 pub async fn cancel_for_student(
     State(state): State<AppState>,
     admin: AuthAdmin,
     Path(id): Path<Uuid>,
+    Json(input): Json<AdminCancelInput>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    service::cancel_booking(&state.pool, id, admin.0, true).await?;
-    Ok(Json(serde_json::json!({"refunded": true})))
+    if input.reason.trim().is_empty() {
+        return Err(AppError::InvalidInput("reason_required"));
+    }
+    let outcome =
+        service::admin_override_cancel(&state.pool, id, admin.0, input.refund, input.reason)
+            .await?;
+    Ok(Json(serde_json::json!({"refunded": outcome.refunded})))
+}
+
+#[derive(Deserialize)]
+pub struct AdminRescheduleInput {
+    new_session_id: Uuid,
+    reason: String,
+}
+
+pub async fn reschedule_booking(
+    State(state): State<AppState>,
+    admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+    Json(input): Json<AdminRescheduleInput>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if input.reason.trim().is_empty() {
+        return Err(AppError::InvalidInput("reason_required"));
+    }
+    let new_booking_id = service::admin_override_reschedule(
+        &state.pool,
+        id,
+        input.new_session_id,
+        admin.0,
+        input.reason,
+    )
+    .await?;
+    Ok(Json(serde_json::json!({"booking_id": new_booking_id})))
 }
 
 pub async fn delete_student(
@@ -1130,6 +1183,76 @@ pub async fn adjust_credit(
     }
     tx.commit().await?;
     Ok(Json(serde_json::json!({"sessions_remaining": remaining})))
+}
+
+#[derive(Serialize)]
+pub struct CreditHistoryEntry {
+    kind: &'static str,
+    at: DateTime<Utc>,
+    reason: String,
+    detail: serde_json::Value,
+    actor_name: Option<String>,
+}
+
+pub async fn credit_history(
+    State(state): State<AppState>,
+    _admin: AuthAdmin,
+    Path((student_id, lot_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Vec<CreditHistoryEntry>>, AppError> {
+    let lot_ok: (bool,) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM credit_lot WHERE id = $1 AND student_id = $2)",
+    )
+    .bind(lot_id)
+    .bind(student_id)
+    .fetch_one(&state.pool)
+    .await?;
+    if !lot_ok.0 {
+        return Err(AppError::BookingNotFound);
+    }
+
+    let ledger: Vec<(i32, i32, String, Option<String>, DateTime<Utc>, Option<String>)> = sqlx::query_as(
+        r#"SELECT l.delta, l.balance_after, l.reason, l.metadata->>'reason', l.created_at, u.full_name
+           FROM credit_ledger l LEFT JOIN app_user u ON u.id = l.actor_id
+           WHERE l.lot_id = $1
+           ORDER BY l.created_at DESC"#,
+    )
+    .bind(lot_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let expiry: Vec<(DateTime<Utc>, DateTime<Utc>, String, DateTime<Utc>, String)> = sqlx::query_as(
+        r#"SELECT e.old_expires_at, e.new_expires_at, e.reason, e.changed_at, u.full_name
+           FROM credit_expiry_change e JOIN app_user u ON u.id = e.changed_by
+           WHERE e.credit_lot_id = $1
+           ORDER BY e.changed_at DESC"#,
+    )
+    .bind(lot_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut entries: Vec<CreditHistoryEntry> = Vec::new();
+    for (delta, balance_after, reason, metadata_reason, created_at, actor_name) in ledger {
+        let display_reason = metadata_reason.unwrap_or(reason);
+        entries.push(CreditHistoryEntry {
+            kind: "credit",
+            at: created_at,
+            reason: display_reason,
+            detail: serde_json::json!({"delta": delta, "balance_after": balance_after}),
+            actor_name,
+        });
+    }
+    for (old_expiry, new_expiry, reason, changed_at, actor_name) in expiry {
+        entries.push(CreditHistoryEntry {
+            kind: "expiry",
+            at: changed_at,
+            reason,
+            detail: serde_json::json!({"old_expires_at": old_expiry, "new_expires_at": new_expiry}),
+            actor_name: Some(actor_name),
+        });
+    }
+    entries.sort_by(|a, b| b.at.cmp(&a.at));
+
+    Ok(Json(entries))
 }
 
 #[derive(Deserialize)]
