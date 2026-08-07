@@ -1199,13 +1199,12 @@ pub async fn credit_history(
     _admin: AuthAdmin,
     Path((student_id, lot_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Vec<CreditHistoryEntry>>, AppError> {
-    let lot_ok: (bool,) = sqlx::query_as(
-        "SELECT EXISTS(SELECT 1 FROM credit_lot WHERE id = $1 AND student_id = $2)",
-    )
-    .bind(lot_id)
-    .bind(student_id)
-    .fetch_one(&state.pool)
-    .await?;
+    let lot_ok: (bool,) =
+        sqlx::query_as("SELECT EXISTS(SELECT 1 FROM credit_lot WHERE id = $1 AND student_id = $2)")
+            .bind(lot_id)
+            .bind(student_id)
+            .fetch_one(&state.pool)
+            .await?;
     if !lot_ok.0 {
         return Err(AppError::BookingNotFound);
     }
@@ -1220,15 +1219,16 @@ pub async fn credit_history(
     .fetch_all(&state.pool)
     .await?;
 
-    let expiry: Vec<(DateTime<Utc>, DateTime<Utc>, String, DateTime<Utc>, String)> = sqlx::query_as(
-        r#"SELECT e.old_expires_at, e.new_expires_at, e.reason, e.changed_at, u.full_name
+    let expiry: Vec<(DateTime<Utc>, DateTime<Utc>, String, DateTime<Utc>, String)> =
+        sqlx::query_as(
+            r#"SELECT e.old_expires_at, e.new_expires_at, e.reason, e.changed_at, u.full_name
            FROM credit_expiry_change e JOIN app_user u ON u.id = e.changed_by
            WHERE e.credit_lot_id = $1
            ORDER BY e.changed_at DESC"#,
-    )
-    .bind(lot_id)
-    .fetch_all(&state.pool)
-    .await?;
+        )
+        .bind(lot_id)
+        .fetch_all(&state.pool)
+        .await?;
 
     let mut entries: Vec<CreditHistoryEntry> = Vec::new();
     for (delta, balance_after, reason, metadata_reason, created_at, actor_name) in ledger {
