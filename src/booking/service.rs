@@ -19,6 +19,75 @@ pub struct CancelOutcome {
     pub refunded: bool,
 }
 
+// Admin ghi nhận buổi đã diễn ra: pick lot, debit, insert booking với status='attended'.
+// Không check thời gian — dành cho trường hợp học viên tập rồi mới cập nhật vào app.
+pub async fn admin_book_attended(
+    pool: &PgPool,
+    student_id: Uuid,
+    session_id: Uuid,
+    admin_id: Uuid,
+) -> Result<Uuid, AppError> {
+    let mut tx = pool.begin().await?;
+
+    let session = queries::lock_session(&mut tx, session_id)
+        .await?
+        .ok_or(AppError::SessionNotFound)?;
+    if session.booked_count >= session.capacity {
+        return Err(AppError::SessionFull);
+    }
+    if queries::has_time_conflict(&mut tx, student_id, session_id).await? {
+        let name = queries::get_student_name(&mut tx, student_id).await?;
+        return Err(AppError::ScheduleConflictNamed(name));
+    }
+
+    let lot_id = queries::pick_credit_lot(
+        &mut tx,
+        student_id,
+        session.class_type_id,
+        session.branch_id,
+        session.start_at,
+    )
+    .await?
+    .ok_or(AppError::NoValidCredit)?;
+
+    let booking_id = match queries::insert_booking_with_status(
+        &mut tx,
+        session_id,
+        student_id,
+        lot_id,
+        admin_id,
+        BookingChannel::Admin,
+        "attended",
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            if e.as_database_error().map(|d| d.is_unique_violation()) == Some(true) {
+                return Err(AppError::AlreadyBooked);
+            }
+            return Err(e.into());
+        }
+    };
+
+    let (_, balance) = queries::adjust_lot(&mut tx, lot_id, -1).await?;
+    queries::adjust_session_count(&mut tx, session_id, 1).await?;
+    queries::write_ledger(
+        &mut tx,
+        lot_id,
+        booking_id,
+        -1,
+        "admin_retroactive_book",
+        admin_id,
+        student_id,
+        balance,
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(booking_id)
+}
+
 // BEGIN → lock session → 3 guard → chọn lot → debit → commit.
 pub async fn book_class(
     pool: &PgPool,

@@ -37,10 +37,7 @@ pub async fn create_session(
     admin: AuthAdmin,
     Json(input): Json<CreateSessionInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
-    if input.end_at <= input.start_at
-        || input.start_at <= Utc::now()
-        || input.end_at - input.start_at > MAX_SESSION_DURATION
-    {
+    if input.end_at <= input.start_at || input.end_at - input.start_at > MAX_SESSION_DURATION {
         return Err(AppError::InvalidInput("invalid_session_time"));
     }
     let config: Option<(i32,)> = sqlx::query_as(
@@ -986,6 +983,19 @@ pub async fn book_for_student(
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({"booking_id": id})),
+    ))
+}
+
+pub async fn book_attended_for_student(
+    State(state): State<AppState>,
+    admin: AuthAdmin,
+    Path((student_id, session_id)): Path<(Uuid, Uuid)>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let booking_id =
+        service::admin_book_attended(&state.pool, student_id, session_id, admin.0).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"booking_id": booking_id})),
     ))
 }
 

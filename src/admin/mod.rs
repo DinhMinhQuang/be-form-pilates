@@ -40,6 +40,10 @@ pub fn routes() -> Router<AppState> {
             post(handlers::book_for_student),
         )
         .route(
+            "/admin/students/:student_id/sessions/:session_id/book-attended",
+            post(handlers::book_attended_for_student),
+        )
+        .route(
             "/admin/bookings/:id/cancel",
             post(handlers::cancel_for_student),
         )
