@@ -157,6 +157,32 @@ pub async fn insert_booking(
     Ok(row.0)
 }
 
+pub async fn insert_booking_with_status(
+    conn: &mut PgConnection,
+    session_id: Uuid,
+    student_id: Uuid,
+    lot_id: Uuid,
+    booked_by: Uuid,
+    channel: BookingChannel,
+    status: &str,
+) -> Result<Uuid, sqlx::Error> {
+    let row: (Uuid,) = sqlx::query_as(
+        r#"INSERT INTO booking
+             (id, session_id, student_id, credit_lot_id, status, booked_by, channel, booked_at, attended_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, now(), CASE WHEN $4 = 'attended' THEN now() ELSE NULL END)
+           RETURNING id"#,
+    )
+    .bind(session_id)
+    .bind(student_id)
+    .bind(lot_id)
+    .bind(status)
+    .bind(booked_by)
+    .bind(channel.as_str())
+    .fetch_one(conn)
+    .await?;
+    Ok(row.0)
+}
+
 pub async fn adjust_lot(
     conn: &mut PgConnection,
     lot_id: Uuid,
