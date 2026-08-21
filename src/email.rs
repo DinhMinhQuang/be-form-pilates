@@ -33,7 +33,7 @@ pub async fn start_worker(pool: PgPool) {
         tracing::warn!("GMAIL_USERNAME/GMAIL_APP_PASSWORD not set, email worker disabled");
         return;
     };
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(15));
     loop {
         interval.tick().await;
         flush(&pool, &mailer, &from).await;
@@ -114,6 +114,19 @@ fn render(template: &str, payload: &Value) -> anyhow::Result<(String, String)> {
 <p><a href="{url}">{url}</a></p>
 <p>Liên kết có hiệu lực trong 15 phút và chỉ sử dụng được một lần.</p>
 <p>Nếu bạn không yêu cầu liên kết này, vui lòng bỏ qua email này.</p>"#
+                ),
+            ))
+        }
+        "password_reset" => {
+            let url = payload["url"].as_str().unwrap_or("#");
+            Ok((
+                "Đặt lại mật khẩu – FORM Pilates".into(),
+                format!(
+                    r#"<p>Xin chào,</p>
+<p>Chúng tôi nhận được yêu cầu đặt lại mật khẩu cho tài khoản FORM Pilates của bạn. Nhấn vào liên kết bên dưới để đặt mật khẩu mới:</p>
+<p><a href="{url}">{url}</a></p>
+<p>Liên kết có hiệu lực trong 30 phút và chỉ sử dụng được một lần.</p>
+<p>Nếu bạn không yêu cầu đặt lại mật khẩu, vui lòng bỏ qua email này.</p>"#
                 ),
             ))
         }
