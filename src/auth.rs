@@ -1,4 +1,7 @@
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use argon2::{
+    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
+    password_hash::{SaltString, rand_core::OsRng as ArgonOsRng},
+};
 use axum::{
     Json, Router, async_trait,
     extract::{FromRequestParts, State},
@@ -15,6 +18,7 @@ use crate::{error::AppError, state::AppState};
 
 const MAGIC_LINK_TTL_MINUTES: i64 = 20;
 const SESSION_TTL_DAYS: i64 = 30;
+const PASSWORD_RESET_TTL_MINUTES: i64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -138,6 +142,24 @@ struct StaffLoginRequest {
     password: String,
 }
 
+#[derive(Deserialize)]
+struct PasswordResetRequest {
+    email: String,
+}
+
+#[derive(Serialize)]
+struct PasswordResetRequestResponse {
+    accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dev_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PasswordResetConfirmRequest {
+    token: String,
+    new_password: String,
+}
+
 #[derive(Serialize)]
 struct SessionResponse {
     access_token: String,
@@ -150,6 +172,8 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/magic-links", post(request_magic_link))
         .route("/auth/magic/exchange", post(exchange_magic_link))
         .route("/auth/staff/login", post(staff_login))
+        .route("/auth/password-reset/request", post(request_password_reset))
+        .route("/auth/password-reset/confirm", post(confirm_password_reset))
 }
 
 async fn request_magic_link(
@@ -251,6 +275,101 @@ async fn staff_login(
     let response = create_session(&mut tx, user_id).await?;
     tx.commit().await?;
     Ok(Json(response))
+}
+
+async fn request_password_reset(
+    State(state): State<AppState>,
+    Json(input): Json<PasswordResetRequest>,
+) -> Result<(StatusCode, Json<PasswordResetRequestResponse>), AppError> {
+    let email = input.email.trim().to_lowercase();
+    let user: Option<(Uuid, String)> = sqlx::query_as(
+        r#"SELECT id, email FROM app_user
+           WHERE role IN ('trainer', 'admin') AND status = 'active' AND lower(email) = $1"#,
+    )
+    .bind(&email)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let mut dev_token = None;
+    if let Some((user_id, recipient)) = user {
+        let mut tx = state.pool.begin().await?;
+        let token = random_token();
+        sqlx::query(
+            "INSERT INTO password_reset_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)",
+        )
+        .bind(user_id)
+        .bind(token_hash(&token))
+        .bind(Utc::now() + Duration::minutes(PASSWORD_RESET_TTL_MINUTES))
+        .execute(&mut *tx)
+        .await?;
+        let base_url = std::env::var("PASSWORD_RESET_BASE_URL")
+            .unwrap_or_else(|_| "http://localhost:3000/reset-password".to_owned());
+        sqlx::query("INSERT INTO email_outbox (recipient, template, payload) VALUES ($1, 'password_reset', $2)")
+            .bind(recipient)
+            .bind(serde_json::json!({"url": format!("{base_url}?token={token}")}))
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        tracing::info!(user_id = %user_id, "password reset token issued; hand token to configured email provider");
+        if std::env::var("EXPOSE_MAGIC_TOKEN").as_deref() == Ok("true") {
+            dev_token = Some(token);
+        }
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(PasswordResetRequestResponse {
+            accepted: true,
+            dev_token,
+        }),
+    ))
+}
+
+async fn confirm_password_reset(
+    State(state): State<AppState>,
+    Json(input): Json<PasswordResetConfirmRequest>,
+) -> Result<StatusCode, AppError> {
+    if input.new_password.len() < 10 {
+        return Err(AppError::InvalidInput("password_too_short"));
+    }
+
+    let mut tx = state.pool.begin().await?;
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        r#"SELECT user_id FROM password_reset_token
+           WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
+           FOR UPDATE"#,
+    )
+    .bind(token_hash(&input.token))
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (user_id,) = row.ok_or(AppError::InvalidInput("invalid_reset_token"))?;
+
+    sqlx::query(
+        "UPDATE password_reset_token SET used_at = now() WHERE user_id = $1 AND used_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let salt = SaltString::generate(&mut ArgonOsRng);
+    let new_hash = Argon2::default()
+        .hash_password(input.new_password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|_| AppError::Integration("password_hash_failed"))?;
+    sqlx::query("UPDATE staff_credential SET password_hash = $2 WHERE user_id = $1")
+        .bind(user_id)
+        .bind(new_hash)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE auth_session SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_session(
