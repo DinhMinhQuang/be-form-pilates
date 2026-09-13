@@ -34,6 +34,14 @@ pub fn routes() -> Router<AppState> {
                 .patch(handlers::update_student)
                 .delete(handlers::delete_student),
         )
+        .route(
+            "/admin/students/:id/magic-link",
+            post(handlers::send_magic_link),
+        )
+        .route(
+            "/admin/email-outbox/:id",
+            get(handlers::email_outbox_status),
+        )
         .route("/admin/bookings", get(handlers::bookings))
         .route(
             "/admin/students/:student_id/sessions/:session_id/book",
