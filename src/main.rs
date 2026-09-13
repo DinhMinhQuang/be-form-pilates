@@ -65,8 +65,8 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(email::start_worker(pool.clone()));
 
     let app = router(AppState { pool });
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await?;
-    tracing::info!("listening on :3001");
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3355").await?;
+    tracing::info!("listening on :3355");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
