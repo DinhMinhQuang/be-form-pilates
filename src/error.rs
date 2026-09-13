@@ -33,6 +33,8 @@ pub enum AppError {
     InvalidInput(&'static str),
     #[error("resource already exists")]
     Conflict,
+    #[error("rate limited: {0}")]
+    RateLimited(&'static str),
     #[error("integration error: {0}")]
     Integration(&'static str),
     #[error("corrupt data: {0}")]
@@ -91,6 +93,9 @@ fn vi_message(code: &str) -> &'static str {
             "Huấn luyện viên chỉ được tạo lớp Private hoặc Duo."
         }
         // Integration / internal
+        "magic_link_rate_limited" => {
+            "Vừa gửi magic link rồi, vui lòng đợi một chút trước khi gửi lại."
+        }
         "integration_error" => "Lỗi tích hợp, vui lòng thử lại sau.",
         "internal" => "Lỗi hệ thống, vui lòng thử lại sau.",
         _ => "Yêu cầu không hợp lệ.",
@@ -124,6 +129,7 @@ impl IntoResponse for AppError {
                 return (StatusCode::BAD_REQUEST, body).into_response();
             }
             AppError::Conflict => (StatusCode::CONFLICT, "conflict"),
+            AppError::RateLimited(key) => (StatusCode::TOO_MANY_REQUESTS, *key),
             AppError::Integration(_) => (StatusCode::INTERNAL_SERVER_ERROR, "integration_error"),
             AppError::Corrupt(what) => {
                 tracing::error!(field = what, "corrupt data in db");

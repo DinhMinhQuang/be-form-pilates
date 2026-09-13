@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    auth::{AuthAdmin, normalize_phone},
+    auth::{AuthAdmin, issue_magic_link, normalize_phone},
     booking::service,
     domain::BookingChannel,
     error::AppError,
@@ -677,6 +677,72 @@ pub async fn create_student(
         StatusCode::CREATED,
         Json(serde_json::json!({"student_id": id})),
     ))
+}
+
+const MAGIC_LINK_COOLDOWN_SECS: f64 = 60.0;
+
+#[derive(Serialize)]
+pub struct EmailOutboxView {
+    id: Uuid,
+    status: String,
+}
+
+pub async fn send_magic_link(
+    State(state): State<AppState>,
+    _admin: AuthAdmin,
+    Path(student_id): Path<Uuid>,
+) -> Result<Json<EmailOutboxView>, AppError> {
+    let recipient: Option<String> =
+        sqlx::query_scalar("SELECT email FROM app_user WHERE id = $1 AND role = 'student'")
+            .bind(student_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .flatten();
+    let recipient = recipient.ok_or(AppError::InvalidInput("student_has_no_email"))?;
+
+    // Chống spam: không cho gửi lại magic link cho cùng 1 recipient trong vòng cooldown,
+    // bất kể lần trước đã gửi thành công hay chưa (worker gửi email mỗi 15s, không cần retry sát nhau).
+    let recently_sent: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM email_outbox WHERE recipient = $1 AND template = 'magic_link' AND created_at > now() - make_interval(secs => $2))",
+    )
+    .bind(&recipient)
+    .bind(MAGIC_LINK_COOLDOWN_SECS)
+    .fetch_one(&state.pool)
+    .await?;
+    if recently_sent {
+        return Err(AppError::RateLimited("magic_link_rate_limited"));
+    }
+
+    let mut tx = state.pool.begin().await?;
+    let token = issue_magic_link(&mut tx, student_id).await?;
+    let base_url = std::env::var("MAGIC_LINK_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:3000/magic".to_owned());
+    let (outbox_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO email_outbox (recipient, template, payload) VALUES ($1, 'magic_link', $2) RETURNING id",
+    )
+    .bind(recipient)
+    .bind(serde_json::json!({"url": format!("{base_url}?token={token}")}))
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Json(EmailOutboxView {
+        id: outbox_id,
+        status: "pending".to_owned(),
+    }))
+}
+
+pub async fn email_outbox_status(
+    State(state): State<AppState>,
+    _admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+) -> Result<Json<EmailOutboxView>, AppError> {
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM email_outbox WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let status = status.ok_or(AppError::SessionNotFound)?;
+    Ok(Json(EmailOutboxView { id, status }))
 }
 
 #[derive(Serialize)]
