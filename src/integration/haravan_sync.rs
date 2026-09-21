@@ -45,20 +45,49 @@ fn regex_capture(s: &str, pattern: &str) -> Option<i32> {
     re.captures(s)?.get(1)?.as_str().parse().ok()
 }
 
-// SKU prefix → danh sách category của class_type cần mở cho branch
+// SKU chứa mã chi nhánh ở đầu (vd "tml-reformer-group-1s-0d") nên dùng contains
+// thay vì starts_with, để loại sản phẩm khớp bất kể prefix chi nhánh nào.
 fn sku_to_categories(sku: &str) -> &'static [&'static str] {
-    if sku.starts_with("mix-") {
+    if sku.contains("mix-") {
         &["private", "group_reformer", "group_mat"]
-    } else if sku.starts_with("reformer-duo") {
+    } else if sku.contains("reformer-duo") {
         &["duo"]
-    } else if sku.starts_with("reformer-private") {
+    } else if sku.contains("reformer-private") {
         &["private"]
-    } else if sku.starts_with("mat-") {
+    } else if sku.contains("mat-") {
         &["group_mat"]
-    } else if sku.starts_with("reformer-") {
+    } else if sku.contains("reformer-") {
         &["group_reformer"]
     } else {
         &[]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sku_to_categories;
+
+    #[test]
+    fn maps_category_regardless_of_branch_prefix() {
+        assert_eq!(
+            sku_to_categories("tml-reformer-group-1s-0d"),
+            &["group_reformer"]
+        );
+        assert_eq!(
+            sku_to_categories("reformer-group-1s-0d"),
+            &["group_reformer"]
+        );
+        assert_eq!(sku_to_categories("tml-mat-10s-60d"), &["group_mat"]);
+        assert_eq!(
+            sku_to_categories("tml-mix-10s-60d"),
+            &["private", "group_reformer", "group_mat"]
+        );
+        assert_eq!(sku_to_categories("tml-reformer-duo-10s-60d"), &["duo"]);
+        assert_eq!(
+            sku_to_categories("tml-reformer-private-10s-60d"),
+            &["private"]
+        );
+        assert_eq!(sku_to_categories("unknown-sku"), &[] as &[&str]);
     }
 }
 
