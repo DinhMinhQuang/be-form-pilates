@@ -69,12 +69,24 @@ mod tests {
 
     #[test]
     fn maps_category_regardless_of_branch_prefix() {
-        assert_eq!(sku_to_categories("tml-reformer-group-1s-0d"), &["group_reformer"]);
-        assert_eq!(sku_to_categories("reformer-group-1s-0d"), &["group_reformer"]);
+        assert_eq!(
+            sku_to_categories("tml-reformer-group-1s-0d"),
+            &["group_reformer"]
+        );
+        assert_eq!(
+            sku_to_categories("reformer-group-1s-0d"),
+            &["group_reformer"]
+        );
         assert_eq!(sku_to_categories("tml-mat-10s-60d"), &["group_mat"]);
-        assert_eq!(sku_to_categories("tml-mix-10s-60d"), &["private", "group_reformer", "group_mat"]);
+        assert_eq!(
+            sku_to_categories("tml-mix-10s-60d"),
+            &["private", "group_reformer", "group_mat"]
+        );
         assert_eq!(sku_to_categories("tml-reformer-duo-10s-60d"), &["duo"]);
-        assert_eq!(sku_to_categories("tml-reformer-private-10s-60d"), &["private"]);
+        assert_eq!(
+            sku_to_categories("tml-reformer-private-10s-60d"),
+            &["private"]
+        );
         assert_eq!(sku_to_categories("unknown-sku"), &[] as &[&str]);
     }
 }
@@ -207,7 +219,7 @@ async fn fetch_and_upsert(api_url: &str, api_token: &str, pool: &PgPool) -> anyh
             .get(format!(
                 "{base}/products.json?collection_id={}&limit=250",
                 collection.id
-        ))
+            ))
             .bearer_auth(api_token)
             .send()
             .await?
