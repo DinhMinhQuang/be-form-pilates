@@ -571,6 +571,7 @@ pub struct StudentQuery {
 #[derive(Serialize)]
 pub struct StudentView {
     id: Uuid,
+    student_code: String,
     full_name: String,
     email: Option<String>,
     phone: Option<String>,
@@ -600,12 +601,12 @@ pub async fn students(
     let cursor = pagination::decode_cursor::<NameCursor>(query.cursor.as_deref());
     let like = query.q.as_ref().map(|q| format!("%{}%", q.trim()));
 
-    let rows: Vec<(Uuid, String, Option<String>, Option<String>, String, i64)> = sqlx::query_as(
-        r#"SELECT u.id, u.full_name, u.email, u.phone, u.status, COALESCE(SUM(cl.sessions_remaining), 0)::bigint
+    let rows: Vec<(Uuid, String, Option<String>, Option<String>, String, i64, String)> = sqlx::query_as(
+        r#"SELECT u.id, u.full_name, u.email, u.phone, u.status, COALESCE(SUM(cl.sessions_remaining), 0)::bigint, u.student_code
            FROM app_user u LEFT JOIN credit_lot cl ON cl.student_id = u.id AND cl.status = 'active'
            WHERE u.role = 'student'
              AND ($1::text IS NULL OR u.status = $1)
-             AND ($2::text IS NULL OR u.full_name ILIKE $2 OR u.phone ILIKE $2)
+             AND ($2::text IS NULL OR u.full_name ILIKE $2 OR u.phone ILIKE $2 OR u.student_code ILIKE $2)
              AND ($3::text IS NULL OR (u.full_name, u.id) > ($3, $4))
            GROUP BY u.id
            ORDER BY u.full_name, u.id
@@ -622,6 +623,7 @@ pub async fn students(
         .into_iter()
         .map(|r| StudentView {
             id: r.0,
+            student_code: r.6,
             full_name: r.1,
             email: r.2,
             phone: r.3,
@@ -687,48 +689,97 @@ pub struct EmailOutboxView {
     status: String,
 }
 
+#[derive(Default, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MagicLinkChannel {
+    #[default]
+    Email,
+    Zalo,
+}
+
+#[derive(Default, Deserialize)]
+pub struct MagicLinkDelivery {
+    #[serde(default)]
+    channel: MagicLinkChannel,
+}
+
 pub async fn send_magic_link(
     State(state): State<AppState>,
     _admin: AuthAdmin,
     Path(student_id): Path<Uuid>,
+    Query(delivery): Query<MagicLinkDelivery>,
 ) -> Result<Json<EmailOutboxView>, AppError> {
-    let recipient: Option<String> =
-        sqlx::query_scalar("SELECT email FROM app_user WHERE id = $1 AND role = 'student'")
-            .bind(student_id)
-            .fetch_optional(&state.pool)
-            .await?
-            .flatten();
-    let recipient = recipient.ok_or(AppError::InvalidInput("student_has_no_email"))?;
-
-    // Chống spam: không cho gửi lại magic link cho cùng 1 recipient trong vòng cooldown,
-    // bất kể lần trước đã gửi thành công hay chưa (worker gửi email mỗi 15s, không cần retry sát nhau).
-    let recently_sent: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM email_outbox WHERE recipient = $1 AND template = 'magic_link' AND created_at > now() - make_interval(secs => $2))",
-    )
-    .bind(&recipient)
-    .bind(MAGIC_LINK_COOLDOWN_SECS)
-    .fetch_one(&state.pool)
-    .await?;
+    let zalo = delivery.channel == MagicLinkChannel::Zalo;
+    if zalo && !crate::zns::template_enabled("magic_link") {
+        return Err(AppError::InvalidInput("zns_not_configured"));
+    }
+    let mut tx = state.pool.begin().await?;
+    // Serialize sends for this student, including simultaneous admin requests.
+    let (email, phone, name, student_code): (Option<String>, Option<String>, String, String) =
+        sqlx::query_as("SELECT email, phone, full_name, student_code FROM app_user WHERE id = $1 AND role = 'student' AND status = 'active' FOR UPDATE")
+            .bind(student_id).fetch_optional(&mut *tx).await?
+            .ok_or(AppError::BookingNotFound)?;
+    let recipient = if zalo { phone } else { email }
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(AppError::InvalidInput(if zalo {
+            "student_has_no_phone"
+        } else {
+            "student_has_no_email"
+        }))?;
+    if zalo {
+        crate::zns::normalize_phone(&recipient)
+            .map_err(|_| AppError::InvalidInput("invalid_phone"))?;
+        if name.trim().is_empty() {
+            return Err(AppError::InvalidInput("student_has_no_name"));
+        }
+    }
+    // Table names are fixed by the enum, never supplied by a caller.
+    let table = if zalo { "sms_outbox" } else { "email_outbox" };
+    let recently_sent: bool = sqlx::query_scalar(&format!(
+        "SELECT EXISTS(SELECT 1 FROM {table} WHERE recipient = $1 AND template = 'magic_link' AND created_at > now() - make_interval(secs => $2))"
+    )).bind(&recipient).bind(MAGIC_LINK_COOLDOWN_SECS).fetch_one(&mut *tx).await?;
     if recently_sent {
         return Err(AppError::RateLimited("magic_link_rate_limited"));
     }
-
-    let mut tx = state.pool.begin().await?;
+    if zalo {
+        let daily_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sms_outbox WHERE recipient = $1 AND template = 'magic_link' AND created_at > now() - interval '24 hours'"
+        ).bind(&recipient).fetch_one(&mut *tx).await?;
+        if daily_count >= 5 {
+            return Err(AppError::RateLimited("zns_daily_limit"));
+        }
+    }
     let token = issue_magic_link(&mut tx, student_id).await?;
     let base_url = std::env::var("MAGIC_LINK_BASE_URL")
         .unwrap_or_else(|_| "http://localhost:3000/magic".to_owned());
-    let (outbox_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO email_outbox (recipient, template, payload) VALUES ($1, 'magic_link', $2) RETURNING id",
-    )
-    .bind(recipient)
-    .bind(serde_json::json!({"url": format!("{base_url}?token={token}")}))
-    .fetch_one(&mut *tx)
-    .await?;
+    let payload = if zalo {
+        serde_json::json!({"login_token": token, "name": name, "student_code": student_code})
+    } else {
+        serde_json::json!({"url": format!("{base_url}?token={token}"), "login_token": token, "name": name, "student_code": student_code})
+    };
+    let outbox_id: Uuid = sqlx::query_scalar(&format!(
+        "INSERT INTO {table} (recipient, template, payload) VALUES ($1, 'magic_link', $2) RETURNING id"
+    )).bind(recipient)
+        .bind(payload)
+        .fetch_one(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(EmailOutboxView {
         id: outbox_id,
         status: "pending".to_owned(),
     }))
+}
+
+pub async fn zns_outbox_status(
+    State(state): State<AppState>,
+    _admin: AuthAdmin,
+    Path(id): Path<Uuid>,
+) -> Result<Json<EmailOutboxView>, AppError> {
+    let status: String = sqlx::query_scalar("SELECT status FROM sms_outbox WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or(AppError::SessionNotFound)?;
+    Ok(Json(EmailOutboxView { id, status }))
 }
 
 pub async fn email_outbox_status(
@@ -763,6 +814,7 @@ pub struct CreditLotView {
 #[derive(Serialize)]
 pub struct StudentDetail {
     id: Uuid,
+    student_code: String,
     full_name: String,
     email: Option<String>,
     phone: Option<String>,
@@ -785,9 +837,10 @@ pub async fn student_detail(
         String,
         Option<String>,
         i64,
+        String,
     )> = sqlx::query_as(
         r#"SELECT u.id, u.full_name, u.email, u.phone, u.status, sp.notes,
-                      COALESCE(SUM(cl.sessions_remaining), 0)::bigint
+                      COALESCE(SUM(cl.sessions_remaining), 0)::bigint, u.student_code
                FROM app_user u
                LEFT JOIN student_profile sp ON sp.user_id = u.id
                LEFT JOIN credit_lot cl ON cl.student_id = u.id AND cl.status = 'active'
@@ -831,6 +884,7 @@ pub async fn student_detail(
 
     Ok(Json(StudentDetail {
         id: r.0,
+        student_code: r.7,
         full_name: r.1,
         email: r.2,
         phone: r.3,
@@ -1525,4 +1579,140 @@ fn map_unique(error: sqlx::Error) -> AppError {
         }
     }
     AppError::Db(error)
+}
+
+#[cfg(test)]
+mod zns_delivery_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[tokio::test]
+    #[ignore = "requires isolated local TEST_DATABASE_URL ending in _zns_test and ZNS_APP_ID/ZNS_APP_SECRET"]
+    async fn admin_zalo_delivery_and_public_email_are_separate() {
+        let url = std::env::var("TEST_DATABASE_URL").unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let database: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(database.ends_with("_zns_test"));
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let student: Uuid = sqlx::query_scalar("INSERT INTO app_user(role, full_name, email, phone) VALUES ('student','Test Student','student@example.test','0901234567') RETURNING id").fetch_one(&pool).await.unwrap();
+        let admin: Uuid = sqlx::query_scalar("INSERT INTO app_user(role, full_name, email) VALUES ('admin','Test Admin','admin@example.test') RETURNING id").fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO auth_session(user_id,token_hash,expires_at) VALUES ($1,$2,now()+interval '1 hour')")
+            .bind(admin).bind(crate::auth::token_hash("test-admin")).execute(&pool).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = crate::router(AppState { pool: pool.clone() });
+        let server = tokio::spawn(async {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        assert_eq!(
+            client
+                .post(format!("{base}/auth/magic-links"))
+                .json(&json!({"email":"student@example.test"}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sms_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "public login must never queue paid Zalo messages");
+        let path = format!("{base}/admin/students/{student}/magic-link?channel=zalo");
+        assert_eq!(
+            client.post(&path).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let response = client
+            .post(&path)
+            .bearer_auth("test-admin")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let outbox: Value = response.json().await.unwrap();
+        let payload: Value = sqlx::query_scalar("SELECT payload FROM sms_outbox WHERE id=$1")
+            .bind(Uuid::parse_str(outbox["id"].as_str().unwrap()).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(payload["name"], "Test Student");
+        assert!(
+            payload["student_code"]
+                .as_str()
+                .unwrap()
+                .starts_with("FORM-")
+        );
+        let login_token = payload["login_token"].as_str().unwrap();
+        assert_eq!(
+            client
+                .post(format!("{base}/auth/magic/exchange"))
+                .json(&json!({"token":login_token}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .post(format!("{base}/auth/magic/exchange"))
+                .json(&json!({"token":login_token}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .post(&path)
+                .bearer_auth("test-admin")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        sqlx::query("UPDATE sms_outbox SET created_at=now()-interval '2 minutes'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let a = client.post(&path).bearer_auth("test-admin").send();
+        let b = client.post(&path).bearer_auth("test-admin").send();
+        let (a, b) = tokio::join!(a, b);
+        let statuses = [a.unwrap().status(), b.unwrap().status()];
+        assert!(statuses.contains(&StatusCode::OK));
+        assert!(statuses.contains(&StatusCode::TOO_MANY_REQUESTS));
+        sqlx::query("UPDATE sms_outbox SET created_at=now()-interval '2 minutes'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sms_outbox(recipient,template,payload,created_at) SELECT '0901234567','magic_link','{}'::jsonb,now()-interval '2 minutes' FROM generate_series(1,3)").execute(&pool).await.unwrap();
+        let response = client
+            .post(&path)
+            .bearer_auth("test-admin")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["error"]["code"],
+            "zns_daily_limit"
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM email_outbox WHERE recipient='student@example.test'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "admin Zalo sends must not send email too");
+        server.abort();
+        pool.close().await;
+    }
 }

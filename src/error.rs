@@ -93,6 +93,12 @@ fn vi_message(code: &str) -> &'static str {
             "Huấn luyện viên chỉ được tạo lớp Private hoặc Duo."
         }
         // Integration / internal
+        "zns_not_configured" => "Chưa cấu hình mẫu Zalo đăng nhập đã duyệt.",
+        "student_has_no_phone" => "Học viên chưa có số điện thoại.",
+        "student_has_no_email" => "Học viên chưa có email.",
+        "student_has_no_name" => "Cần bổ sung họ tên học viên trước khi gửi Zalo.",
+        "invalid_phone" => "Số điện thoại không hợp lệ để gửi Zalo.",
+        "zns_daily_limit" => "Đã đạt giới hạn 5 tin đăng nhập Zalo cho học viên trong 24 giờ.",
         "magic_link_rate_limited" => {
             "Vừa gửi magic link rồi, vui lòng đợi một chút trước khi gửi lại."
         }

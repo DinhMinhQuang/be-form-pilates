@@ -42,6 +42,7 @@ pub fn routes() -> Router<AppState> {
             "/admin/email-outbox/:id",
             get(handlers::email_outbox_status),
         )
+        .route("/admin/zns-outbox/:id", get(handlers::zns_outbox_status))
         .route("/admin/bookings", get(handlers::bookings))
         .route(
             "/admin/students/:student_id/sessions/:session_id/book",
