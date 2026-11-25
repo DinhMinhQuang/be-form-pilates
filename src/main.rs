@@ -7,11 +7,14 @@ mod email;
 mod error;
 mod integration;
 mod middleware;
+mod notification;
 mod pagination;
 mod request_id;
 mod state;
 mod student;
 mod trainer;
+mod zns;
+mod zns_token;
 
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
@@ -63,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     tokio::spawn(email::start_worker(pool.clone()));
+    tokio::spawn(zns::start_worker(pool.clone()));
 
     let app = router(AppState { pool });
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3355").await?;

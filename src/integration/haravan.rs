@@ -13,6 +13,31 @@ use uuid::Uuid;
 
 use crate::{auth, error::AppError, state::AppState};
 
+// Use the order's displayed number and creation date, rather than its internal ID
+// and payment timestamp. Keep missing price empty so delivery fails visibly.
+fn order_notification_fields(payload: &Value, external_id: &str, paid_at: DateTime<Utc>) -> Value {
+    let scalar = |field: &str| -> Option<String> {
+        match &payload[field] {
+            Value::String(value) if !value.trim().is_empty() => Some(value.clone()),
+            Value::Number(value) => Some(value.to_string()),
+            _ => None,
+        }
+    };
+    let order_code = scalar("name")
+        .or_else(|| scalar("order_number"))
+        .unwrap_or_else(|| external_id.to_owned());
+    let price = scalar("total_price").unwrap_or_default();
+    let date = payload["created_at"]
+        .as_str()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or(paid_at)
+        .with_timezone(&chrono::FixedOffset::east_opt(7 * 3600).unwrap())
+        .format("%d/%m/%Y")
+        .to_string();
+    json!({"order_code": order_code, "price": price.strip_suffix(".0").unwrap_or(&price), "date": date})
+}
+
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Deserialize)]
@@ -241,14 +266,26 @@ pub async fn order_paid(
         return Err(AppError::Integration("no_mapped_course_package"));
     }
 
-    if let Some(recipient) = email {
-        let magic_token = auth::issue_magic_link(&mut tx, student_id).await?;
-        let base_url = std::env::var("MAGIC_LINK_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:3000/magic".to_owned());
-        sqlx::query("INSERT INTO email_outbox (recipient, template, payload) VALUES ($1, 'order_confirmed_magic_link', $2)")
-            .bind(recipient).bind(json!({"url": format!("{base_url}?token={magic_token}"), "external_order_id": external_order_id}))
-            .execute(&mut *tx).await?;
-    }
+    let (recipient_email, recipient_phone, recipient_name): (
+        Option<String>,
+        Option<String>,
+        String,
+    ) = sqlx::query_as("SELECT email, phone, full_name FROM app_user WHERE id = $1")
+        .bind(student_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let magic_token = auth::issue_magic_link(&mut tx, student_id).await?;
+    let base_url = std::env::var("MAGIC_LINK_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:3000/magic".to_owned());
+    let order_fields = order_notification_fields(&payload, &external_order_id, activated_at);
+    crate::notification::enqueue(
+        &mut tx, recipient_email.as_deref(), recipient_phone.as_deref(),
+        "order_confirmed_magic_link",
+        json!({"url": format!("{base_url}?token={magic_token}"), "login_token": magic_token, "external_order_id": external_order_id,
+            "name": recipient_name, "phone_number": recipient_phone,
+            "order_code": order_fields["order_code"], "price": order_fields["price"],
+            "status": "Đã thanh toán", "date": order_fields["date"]}),
+    ).await?;
     sqlx::query(
         "UPDATE integration_event SET status = 'processed', processed_at = now() WHERE id = $1",
     )
@@ -283,6 +320,21 @@ pub async fn verify_webhook(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn order_template_uses_customer_facing_number_price_and_local_creation_date() {
+        let fields = order_notification_fields(
+            &json!({"name":"#10011", "total_price":"3500000.0", "created_at":"2026-08-07T18:00:00Z"}),
+            "1829501516",
+            Utc::now(),
+        );
+        assert_eq!(
+            fields,
+            json!({"order_code":"#10011", "price":"3500000", "date":"08/08/2026"})
+        );
+        let missing = order_notification_fields(&json!({}), "internal-id", Utc::now());
+        assert_eq!(missing["price"], "");
+    }
 
     #[test]
     fn verifies_haravan_hmac() {

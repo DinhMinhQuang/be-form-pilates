@@ -186,8 +186,8 @@ async fn request_magic_link(
         return Err(AppError::InvalidInput("email_or_phone_required"));
     }
 
-    let student: Option<(Uuid, Option<String>)> = sqlx::query_as(
-        r#"SELECT id, email FROM app_user
+    let student: Option<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
+        r#"SELECT id, email, phone FROM app_user
            WHERE role = 'student' AND status = 'active'
              AND (($1::text IS NOT NULL AND lower(email) = $1)
                OR ($2::text IS NOT NULL AND phone = $2))"#,
@@ -198,20 +198,21 @@ async fn request_magic_link(
     .await?;
 
     let mut dev_token = None;
-    if let Some((student_id, recipient)) = student {
+    if let Some((student_id, Some(recipient), _phone)) = student {
         let mut tx = state.pool.begin().await?;
         let token = issue_magic_link(&mut tx, student_id).await?;
-        if let Some(recipient) = recipient {
-            let base_url = std::env::var("MAGIC_LINK_BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:3000/magic".to_owned());
-            sqlx::query("INSERT INTO email_outbox (recipient, template, payload) VALUES ($1, 'magic_link', $2)")
-                .bind(recipient)
-                .bind(serde_json::json!({"url": format!("{base_url}?token={token}")}))
-                .execute(&mut *tx)
-                .await?;
-        }
+        let base_url = std::env::var("MAGIC_LINK_BASE_URL")
+            .unwrap_or_else(|_| "http://localhost:3000/magic".to_owned());
+        crate::notification::enqueue(
+            &mut tx,
+            Some(&recipient),
+            None,
+            "magic_link",
+            serde_json::json!({"url": format!("{base_url}?token={token}"), "login_token": token}),
+        )
+        .await?;
         tx.commit().await?;
-        tracing::info!(student_id = %student_id, "magic link issued; hand token to configured email provider");
+        tracing::info!(student_id = %student_id, "magic link queued for notification delivery");
         if std::env::var("EXPOSE_MAGIC_TOKEN").as_deref() == Ok("true") {
             dev_token = Some(token);
         }
@@ -282,8 +283,8 @@ async fn request_password_reset(
     Json(input): Json<PasswordResetRequest>,
 ) -> Result<(StatusCode, Json<PasswordResetRequestResponse>), AppError> {
     let email = input.email.trim().to_lowercase();
-    let user: Option<(Uuid, String)> = sqlx::query_as(
-        r#"SELECT id, email FROM app_user
+    let user: Option<(Uuid, String, Option<String>)> = sqlx::query_as(
+        r#"SELECT id, email, phone FROM app_user
            WHERE role IN ('trainer', 'admin') AND status = 'active' AND lower(email) = $1"#,
     )
     .bind(&email)
@@ -291,7 +292,7 @@ async fn request_password_reset(
     .await?;
 
     let mut dev_token = None;
-    if let Some((user_id, recipient)) = user {
+    if let Some((user_id, recipient, phone)) = user {
         let mut tx = state.pool.begin().await?;
         let token = random_token();
         sqlx::query(
@@ -304,13 +305,16 @@ async fn request_password_reset(
         .await?;
         let base_url = std::env::var("PASSWORD_RESET_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:3000/reset-password".to_owned());
-        sqlx::query("INSERT INTO email_outbox (recipient, template, payload) VALUES ($1, 'password_reset', $2)")
-            .bind(recipient)
-            .bind(serde_json::json!({"url": format!("{base_url}?token={token}")}))
-            .execute(&mut *tx)
-            .await?;
+        crate::notification::enqueue(
+            &mut tx,
+            Some(&recipient),
+            phone.as_deref(),
+            "password_reset",
+            serde_json::json!({"url": format!("{base_url}?token={token}")}),
+        )
+        .await?;
         tx.commit().await?;
-        tracing::info!(user_id = %user_id, "password reset token issued; hand token to configured email provider");
+        tracing::info!(user_id = %user_id, "password reset token queued for notification delivery");
         if std::env::var("EXPOSE_MAGIC_TOKEN").as_deref() == Ok("true") {
             dev_token = Some(token);
         }
